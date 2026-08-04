@@ -1,31 +1,5 @@
 package lann:iroh-spike@0.0.1;
 
-/// Ad-hoc demo signaling: a two-role blob mailbox relayed through an HTTP
-/// signaling server, used to exchange SDP, trickled ICE candidates, and
-/// endpoint identities between the two demo processes. This interface is
-/// demo plumbing for the spike only: the iroh design carries signaling over
-/// the relay connection (`lann:websocket`) once that path exists.
-interface rendezvous {
-    use lann:webrtc-datachannels/types@0.1.0.{error};
-
-    /// Which mailbox this session publishes to. The offerer role also acts
-    /// as the QUIC client; the answerer accepts.
-    enum role { offerer, answerer }
-
-    /// A joined signaling session bound to one room and role.
-    resource session {
-        /// Join `room` on the signaling server at `server` as `as-role`.
-        open: static async func(server: string, room: string, as-role: role) -> result<session, error>;
-        /// Publish one opaque blob to this session's own mailbox.
-        send: async func(blob: list<u8>) -> result<_, error>;
-        /// Fetch the next blob from the peer's mailbox; `none` once the
-        /// peer has marked its mailbox done.
-        recv: async func() -> result<option<list<u8>>, error>;
-        /// Mark this session's mailbox done.
-        done: async func() -> result<_, error>;
-    }
-}
-
 /// The spike's demo surface: one happy-path QUIC-over-data-channel run.
 ///
 /// This is not the designed endpoint surface (that design is tracked
@@ -39,9 +13,11 @@ interface demo {
 
     /// One run's inputs.
     record run-config {
-        /// Signaling server base URL, e.g. `http://127.0.0.1:8080`.
+        /// Relay server base URL, e.g. `ws://127.0.0.1:8090`. The relay
+        /// pairs the two processes and forwards their signaling; both
+        /// processes must name the same server.
         server: string,
-        /// Signaling room both processes join.
+        /// Relay room both processes join.
         room: string,
         /// This process's role.
         role: role,
@@ -70,10 +46,12 @@ interface demo {
     run: async func(config: run-config) -> result<run-report, string>;
 }
 
-/// One demo peer: WebRTC transport and signaling in, the demo run out.
+/// One demo peer: WebRTC transport and relay connectivity in, the demo run
+/// out. Signaling rides a `lann:websocket` connection to the relay server,
+/// the leg both sides of the designed endpoint hold anyway.
 world iroh-spike {
     import lann:webrtc-datachannels/connections@0.1.0;
-    import rendezvous;
+    import lann:websocket/connections@0.1.0;
     import wasi:clocks/monotonic-clock@0.3.0;
     export demo;
 }

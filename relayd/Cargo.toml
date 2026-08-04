@@ -1,0 +1,16 @@
+[package]
+name = "iroh-spike-relayd"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "Spike relay server: pairs two WebSocket peers per room and forwards their frames"
+
+[[bin]]
+name = "iroh-spike-relayd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
+tokio-tungstenite = "0.28"

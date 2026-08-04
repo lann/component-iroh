@@ -1,14 +1,15 @@
 // Driver for one peer of the QUIC-over-data-channel demo under the Node
 // host: the transpiled `iroh-spike` component connects to a genuinely
-// separate peer instance through `rendezvous.js` (fetch against the local
-// signaling server), the webrtc sibling's `webrtc.js` (node-datachannel),
-// and the webcrypto sibling's `webcrypto.js` (Web Crypto API).
+// separate peer instance, signaling over the websocket sibling's
+// `websocket.js` (a relay connection), with the webrtc sibling's
+// `webrtc.js` (node-datachannel) as the wire and the webcrypto sibling's
+// `webcrypto.js` (Web Crypto API) behind the handshake.
 //
 // Run two of these — a client and a server — against the same room:
 //
-//   conformance-signalingd --host 127.0.0.1 --port 8080 &
-//   npm run start -- --role server --server http://127.0.0.1:8080 --room demo &
-//   npm run start -- --role client --server http://127.0.0.1:8080 --room demo
+//   iroh-spike-relayd --addr 127.0.0.1:8090 &
+//   npm run start -- --role server --server ws://127.0.0.1:8090 --room demo &
+//   npm run start -- --role client --server ws://127.0.0.1:8090 --room demo
 import { parseArgs } from "node:util";
 
 import { demo } from "../generated/iroh-spike.js";

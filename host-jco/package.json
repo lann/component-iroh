@@ -3,9 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Spike Node host: transpiles the iroh-spike guest with jco and runs it on Node 24+ (JSPI), with webrtc/webcrypto served by the sibling host modules.",
+  "description": "Spike Node host: transpiles the iroh-spike guest with jco and runs it on Node 24+ (JSPI), with webrtc/webcrypto/websocket served by the sibling host modules.",
   "scripts": {
-    "transpile": "node ../scripts/jco-transpile.mjs transpile ../target/wasm32-wasip2/release/iroh_spike_guest.wasm --name iroh-spike --async-mode jspi --map 'lann:webcrypto/*@0.1.0=../../.deps/webcrypto/js/jco/webcrypto.js#*' --map 'lann:webrtc-datachannels/connections@0.1.0=../../.deps/webrtc/jco-impl/webrtc.js' --map 'lann:iroh-spike/rendezvous@0.0.1=../rendezvous.js' --map 'wasi:clocks/monotonic-clock@0.3.0=@bytecodealliance/preview3-shim/clocks#monotonicClock' -o generated",
+    "transpile": "node ../scripts/jco-transpile.mjs transpile ../target/wasm32-wasip2/release/iroh_spike_guest.wasm --name iroh-spike --async-mode jspi --map 'lann:webcrypto/*@0.1.0=../../.deps/webcrypto/js/jco/webcrypto.js#*' --map 'lann:webrtc-datachannels/connections@0.1.0=../../.deps/webrtc/jco-impl/webrtc.js' --map 'lann:websocket/connections@0.1.0=../../.deps/websocket/js/jco/websocket.js' --map 'wasi:clocks/monotonic-clock@0.3.0=@bytecodealliance/preview3-shim/clocks#monotonicClock' -o generated && node ../.deps/websocket/scripts/patch-jco-string-lowering.mjs generated/iroh-spike.js",
     "start": "node --experimental-wasm-jspi src/run.mjs"
   },
   "devDependencies": {

@@ -9,30 +9,28 @@
 //!     endpoint timer),
 //!   * the `connections`/`types` surface via [`wasmtime_webrtc_datachannels`]
 //!     (a real `webrtc-rs` peer connection),
+//!   * the `lann:websocket` surface via [`wasmtime_websocket`]
+//!     (tokio-tungstenite; carries the guest's relay signaling), and
 //!   * the `lann:webcrypto` surface via [`lann_webcrypto_wasmtime`]
-//!     (RustCrypto), and
-//!   * the demo `rendezvous` signaling mailbox, implemented natively here
-//!     with an HTTP client speaking `conformance-signalingd`'s protocol.
+//!     (RustCrypto).
 //!
-//! Run two instances — a client and a server — pointed at the same room on
-//! the same signaling server:
+//! Run two instances — a client and a server — pointed at the same room
+//! on the same relay server:
 //!
 //! ```sh
-//! conformance-signalingd --host 127.0.0.1 --port 8080 &
-//! iroh-spike-host <component.wasm> --role server --server http://127.0.0.1:8080 --room demo &
-//! iroh-spike-host <component.wasm> --role client --server http://127.0.0.1:8080 --room demo
+//! iroh-spike-relayd --addr 127.0.0.1:8090 &
+//! iroh-spike-host <component.wasm> --role server --server ws://127.0.0.1:8090 --room demo &
+//! iroh-spike-host <component.wasm> --role client --server ws://127.0.0.1:8090 --room demo
 //! ```
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
 use lann_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
-use wasmtime::component::{Accessor, Component, HasData, Linker, Resource, ResourceTable};
+use wasmtime::component::{Accessor, Component, HasData, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Result, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_webrtc_datachannels::{
     self as webrtc_host, WasiWebrtcCtx, WasiWebrtcCtxView, WasiWebrtcView,
 };
+use wasmtime_websocket::{WasiWebsocketCtx, WasiWebsocketCtxView, WasiWebsocketView};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -44,28 +42,16 @@ mod bindings {
         exports: {
             default: async,
         },
-        with: {
-            "lann:webrtc-datachannels/connections.data-channel-options":
-                wasmtime_webrtc_datachannels::DataChannelOptions,
-            "lann:webrtc-datachannels/connections.peer-connection-config":
-                wasmtime_webrtc_datachannels::PeerConnectionConfig,
-            "lann:webrtc-datachannels/connections.data-channel":
-                wasmtime_webrtc_datachannels::DataChannel,
-            "lann:webrtc-datachannels/connections.peer-connection":
-                wasmtime_webrtc_datachannels::PeerConnection,
-            "lann:iroh-spike/rendezvous.session": crate::RendezvousSession,
-        },
     });
 }
 
 use bindings::exports::lann::iroh_spike::demo::{Role as DemoRole, RunConfig};
-use bindings::lann::iroh_spike::rendezvous::{self, Role as RendezvousRole};
-use bindings::lann::webrtc_datachannels::types::Error;
 
 struct Ctx {
     wasi: WasiCtx,
     webrtc: WasiWebrtcCtx,
     webcrypto: WasiWebcryptoCtx,
+    websocket: WasiWebsocketCtx,
     table: ResourceTable,
 }
 
@@ -100,6 +86,15 @@ impl WasiWebcryptoView for Ctx {
     }
 }
 
+impl WasiWebsocketView for Ctx {
+    fn websocket(&mut self) -> WasiWebsocketCtxView<'_> {
+        WasiWebsocketCtxView {
+            ctx: &mut self.websocket,
+            table: &mut self.table,
+        }
+    }
+}
+
 /// The component model with component-model async enabled (the guest's
 /// imports and its `run` export use the async ABI).
 fn engine() -> Result<Engine> {
@@ -121,168 +116,6 @@ fn webrtc_ctx() -> WasiWebrtcCtx {
     ctx
 }
 
-// --- native rendezvous host ---------------------------------------------------
-
-/// A joined rendezvous session: an HTTP client bound to one `{room}` and
-/// `{role}` on the signaling server. `Arc`-backed so a handle can be cloned
-/// out of the resource table and its async methods driven without holding
-/// the store borrow across `.await`.
-#[derive(Clone)]
-pub struct RendezvousSession {
-    client: reqwest::Client,
-    base: String,
-    room: String,
-    role: RendezvousRole,
-    /// The next sequence number to fetch from the peer's mailbox.
-    recv_seq: Arc<AtomicUsize>,
-}
-
-impl RendezvousSession {
-    /// This session's own role path segment.
-    fn own_role(&self) -> &'static str {
-        match self.role {
-            RendezvousRole::Offerer => "offerer",
-            RendezvousRole::Answerer => "answerer",
-        }
-    }
-
-    /// The peer's role path segment (the mailbox this session consumes).
-    fn peer_role(&self) -> &'static str {
-        match self.role {
-            RendezvousRole::Offerer => "answerer",
-            RendezvousRole::Answerer => "offerer",
-        }
-    }
-}
-
-/// Map any host-side rendezvous failure to the guest-visible `error.other`.
-fn rendezvous_error(detail: impl std::fmt::Display) -> Error {
-    Error::Other(format!("rendezvous: {detail}"))
-}
-
-impl rendezvous::Host for Ctx {}
-
-impl rendezvous::HostSession for Ctx {}
-
-impl rendezvous::HostSessionWithStore<Ctx> for Ctx {
-    async fn open(
-        accessor: &Accessor<Ctx, Ctx>,
-        server: String,
-        room: String,
-        as_role: RendezvousRole,
-    ) -> wasmtime::Result<std::result::Result<Resource<RendezvousSession>, Error>> {
-        let session = RendezvousSession {
-            client: reqwest::Client::new(),
-            base: server.trim_end_matches('/').to_string(),
-            room,
-            role: as_role,
-            recv_seq: Arc::new(AtomicUsize::new(0)),
-        };
-        accessor.with(|mut access| {
-            let resource = access.get().table.push(session)?;
-            Ok(Ok(resource))
-        })
-    }
-
-    async fn send(
-        accessor: &Accessor<Ctx, Ctx>,
-        self_: Resource<RendezvousSession>,
-        blob: Vec<u8>,
-    ) -> wasmtime::Result<std::result::Result<(), Error>> {
-        let session = accessor
-            .with(|mut access| Ok::<_, wasmtime::Error>(access.get().table.get(&self_)?.clone()))?;
-        let url = format!(
-            "{}/rooms/{}/{}",
-            session.base,
-            session.room,
-            session.own_role()
-        );
-        Ok(match session.client.post(&url).body(blob).send().await {
-            Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) => Err(rendezvous_error(format!(
-                "publish status {}",
-                resp.status()
-            ))),
-            Err(err) => Err(rendezvous_error(err)),
-        })
-    }
-
-    async fn recv(
-        accessor: &Accessor<Ctx, Ctx>,
-        self_: Resource<RendezvousSession>,
-    ) -> wasmtime::Result<std::result::Result<Option<Vec<u8>>, Error>> {
-        let session = accessor
-            .with(|mut access| Ok::<_, wasmtime::Error>(access.get().table.get(&self_)?.clone()))?;
-        Ok(fetch_next(&session).await)
-    }
-
-    async fn done(
-        accessor: &Accessor<Ctx, Ctx>,
-        self_: Resource<RendezvousSession>,
-    ) -> wasmtime::Result<std::result::Result<(), Error>> {
-        let session = accessor
-            .with(|mut access| Ok::<_, wasmtime::Error>(access.get().table.get(&self_)?.clone()))?;
-        let url = format!(
-            "{}/rooms/{}/{}/done",
-            session.base,
-            session.room,
-            session.own_role()
-        );
-        Ok(match session.client.post(&url).send().await {
-            Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) => Err(rendezvous_error(format!("done status {}", resp.status()))),
-            Err(err) => Err(rendezvous_error(err)),
-        })
-    }
-
-    async fn drop(
-        accessor: &Accessor<Ctx, Ctx>,
-        rep: Resource<RendezvousSession>,
-    ) -> wasmtime::Result<()> {
-        accessor.with(|mut access| {
-            access.get().table.delete(rep)?;
-            Ok(())
-        })
-    }
-}
-
-/// Fetch the next blob from the peer's mailbox, long-polling and retrying
-/// `304` until a blob arrives (`some`) or the peer marks its mailbox done
-/// (`none`).
-async fn fetch_next(session: &RendezvousSession) -> std::result::Result<Option<Vec<u8>>, Error> {
-    loop {
-        let seq = session.recv_seq.load(Ordering::SeqCst);
-        let url = format!(
-            "{}/rooms/{}/{}?seq={}&wait=10000",
-            session.base,
-            session.room,
-            session.peer_role(),
-            seq
-        );
-        let resp = session
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(rendezvous_error)?;
-        match resp.status().as_u16() {
-            // A blob is available: advance our read cursor and return it.
-            200 => {
-                let bytes = resp.bytes().await.map_err(rendezvous_error)?.to_vec();
-                session.recv_seq.store(seq + 1, Ordering::SeqCst);
-                return Ok(Some(bytes));
-            }
-            // The peer marked its mailbox done at or before this seq.
-            204 => return Ok(None),
-            // Not yet available; retry the same seq.
-            304 => continue,
-            other => return Err(rendezvous_error(format!("fetch status {other}"))),
-        }
-    }
-}
-
-// --- host entry point ----------------------------------------------------------
-
 struct Cli {
     component: String,
     role: DemoRole,
@@ -294,7 +127,7 @@ struct Cli {
 fn usage() -> wasmtime::Error {
     wasmtime::Error::msg(
         "usage: iroh-spike-host <component.wasm> --role <client|server> \
-         --server <base-url> --room <room> [--message M]",
+         --server <relay-ws-url> --room <room> [--message M]",
     )
 }
 
@@ -343,7 +176,7 @@ async fn main() -> Result<()> {
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     webrtc_host::add_to_linker(&mut linker)?;
     lann_webcrypto_wasmtime::add_to_linker(&mut linker)?;
-    rendezvous::add_to_linker::<Ctx, Ctx>(&mut linker, |c| c)?;
+    wasmtime_websocket::add_to_linker(&mut linker)?;
 
     let mut wasi = WasiCtx::builder();
     wasi.inherit_stdio().inherit_env();
@@ -353,6 +186,7 @@ async fn main() -> Result<()> {
             wasi: wasi.build(),
             webrtc: webrtc_ctx(),
             webcrypto: WasiWebcryptoCtx::new(),
+            websocket: WasiWebsocketCtx::new(),
             table: ResourceTable::new(),
         },
     );
