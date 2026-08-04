@@ -11,6 +11,17 @@ interface demo {
     /// the server is the answerer and accepts the QUIC connection.
     enum role { client, server }
 
+    /// The wire QUIC runs over. QUIC is end-to-end on either wire: the
+    /// relay never holds connection keys.
+    enum transport {
+        /// A WebRTC data channel between the peers (unreliable and
+        /// unordered); the relay carries only signaling.
+        webrtc,
+        /// The relay connection itself: QUIC datagrams travel as binary
+        /// frames forwarded by the relay. No WebRTC involved.
+        relay,
+    }
+
     /// One run's inputs.
     record run-config {
         /// Relay server base URL, e.g. `ws://127.0.0.1:8090`. The relay
@@ -21,6 +32,8 @@ interface demo {
         room: string,
         /// This process's role.
         role: role,
+        /// The wire QUIC runs over.
+        transport: transport,
         /// The application message the client sends (the server echoes it).
         message: string,
     }

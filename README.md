@@ -139,9 +139,10 @@ scale.
 ## The spike: one QUIC connection over a data channel
 
 The `spike/quic-over-datachannel` work carries the first code: a
-happy-path QUIC connection between two component instances over a real
-WebRTC data channel, resolving the crypto-integration question (issue
-#5, Path A) and recording a first transport profile (issue #1).
+happy-path QUIC connection between two component instances, resolving the
+crypto-integration question (issue #5, Path A), recording a first
+transport profile (issue #1), and exercising both wires the design names
+— a WebRTC data channel and the relay connection itself.
 
 - **One guest component** (`guest/`, `wasm32-wasip2`): `quinn-proto`
   with default features off, driven by a custom rustls `CryptoProvider`
@@ -153,39 +154,47 @@ WebRTC data channel, resolving the crypto-integration question (issue
   the async imports with `wit_bindgen::block_on`, which is legal because
   the demo's only export (`demo.run`) is async-lifted.
 - **Iroh-style identity**: TLS authenticates raw public keys (RFC 7250);
-  the Ed25519 key in the SPKI is the endpoint ID. The signaling mailbox
-  only *claims* an identity; the handshake authenticates it, and the two
+  the Ed25519 key in the SPKI is the endpoint ID. Signaling only
+  *claims* an identity; the handshake authenticates it, and the two
   must agree.
-- **Transport profile**: the channel is unreliable and unordered
-  (`ordered=false`, `max-retransmits=0`); one QUIC datagram rides in one
-  binary channel message; fixed 1200-byte initial MTU with MTU discovery
-  and GSO batching disabled (the channel fragments transparently, so
-  probing would measure nothing real).
-- **Two hosts, four pairings**: a Wasmtime host (`host-wasmtime/`, the
-  sibling host crates plus a native rendezvous client) and a Node 24+
-  jco host (`host-jco/`, the siblings' JS host modules, JSPI). Every
+- **Signaling rides a relay connection** (`lann:websocket`): each peer
+  opens a WebSocket to `relayd/` — a room-pairing frame forwarder — and
+  exchanges identities, SDP, and trickled ICE over it. There is no
+  side-channel signaling import; the relay leg is the one the designed
+  endpoint holds anyway.
+- **Two wires, one endpoint** (`--transport webrtc|relay`): QUIC runs
+  end-to-end either over an unreliable, unordered data channel
+  (`ordered=false`, `max-retransmits=0`) or over the relay connection
+  itself, with the relay never holding connection keys. One QUIC
+  datagram rides in one binary message on either carrier; fixed
+  1200-byte initial MTU with MTU discovery and GSO batching disabled.
+- **Two hosts, four pairings per wire**: a Wasmtime host
+  (`host-wasmtime/`, the sibling host crates) and a Node 24+ jco host
+  (`host-jco/`, the siblings' JS host modules, JSPI). Every
   client/server pairing of the two hosts exchanges one authenticated
-  echo each way.
+  echo each way on both wires.
 
-To run it: build the guest and hosts, start the webrtc sibling's
-signaling server, and point a server and a client at the same room
-(`WEBRTC_INCLUDE_LOOPBACK=1` lets same-host peers pair):
+To run it: build the guest, hosts, and relay, then point a server and a
+client at the same room (`WEBRTC_INCLUDE_LOOPBACK=1` lets same-host
+peers pair on the WebRTC wire):
 
 ```sh
-./scripts/setup.sh   # git worktrees under .deps + npm installs
+./scripts/setup.sh   # sibling checkouts under .deps + npm installs
 cargo build -p iroh-spike-guest --target wasm32-wasip2 --release
-cargo build -p iroh-spike-host-wasmtime --release
-cargo run --manifest-path .deps/webrtc/Cargo.toml -p conformance-signalingd -- --host 127.0.0.1 --port 8080 &
+cargo build -p iroh-spike-host-wasmtime -p iroh-spike-relayd --release
+target/release/iroh-spike-relayd --addr 127.0.0.1:8090 &
 WEBRTC_INCLUDE_LOOPBACK=1 target/release/iroh-spike-host \
   target/wasm32-wasip2/release/iroh_spike_guest.wasm \
-  --role server --server http://127.0.0.1:8080 --room demo &
+  --role server --server ws://127.0.0.1:8090 --room demo &
 WEBRTC_INCLUDE_LOOPBACK=1 target/release/iroh-spike-host \
   target/wasm32-wasip2/release/iroh_spike_guest.wasm \
-  --role client --server http://127.0.0.1:8080 --room demo
+  --role client --server ws://127.0.0.1:8090 --room demo
 ```
 
-For the Node host: `cd host-jco && npm install && npm run transpile`,
-then `npm run start -- --role <client|server> --server ... --room ...`.
+Add `--transport relay` to both sides to run QUIC through the relay
+instead of a data channel. For the Node host: `cd host-jco &&
+npm install && npm run transpile`, then `npm run start -- --role
+<client|server> --server ... --room ...`.
 
 ## Open questions
 

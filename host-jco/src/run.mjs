@@ -19,6 +19,7 @@ const { values } = parseArgs({
     role: { type: "string" },
     server: { type: "string" },
     room: { type: "string" },
+    transport: { type: "string", default: "webrtc" },
     message: { type: "string", default: "hello over QUIC over a data channel" },
   },
 });
@@ -48,12 +49,20 @@ async function unwrapResult(call) {
 }
 
 async function main() {
-  const { role, server, room, message } = values;
-  if (!role || !server || !room || !["client", "server"].includes(role)) {
-    throw new Error("usage: run.mjs --role <client|server> --server <url> --room <id> [--message M]");
+  const { role, server, room, transport, message } = values;
+  if (
+    !role ||
+    !server ||
+    !room ||
+    !["client", "server"].includes(role) ||
+    !["webrtc", "relay"].includes(transport)
+  ) {
+    throw new Error(
+      "usage: run.mjs --role <client|server> --server <url> --room <id> [--transport <webrtc|relay>] [--message M]",
+    );
   }
 
-  const report = await unwrapResult(() => demo.run({ server, room, role, message }));
+  const report = await unwrapResult(() => demo.run({ server, room, role, transport, message }));
 
   console.log(
     `iroh-spike (${role}): endpoint=${report.endpointId} peer=${report.peerId} ` +

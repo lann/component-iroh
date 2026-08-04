@@ -12,6 +12,8 @@ WEBRTC_REPO=https://github.com/lann/component-webrtc-datachannels.git
 WEBRTC_PIN=2f12c3136d576fd8d7d4a68f21df1c3d1a1bcf7e
 WEBCRYPTO_REPO=https://github.com/lann/component-webcrypto.git
 WEBCRYPTO_PIN=7110a990063076650d2c7cb3acde9b86d5b615da
+WEBSOCKET_REPO=https://github.com/lann/component-websocket.git
+WEBSOCKET_PIN=7b99e72f578746d74cd225d066248532d062c27b
 
 # Check out `repo` at `pin` under .deps/`name`, cloning or fetching as
 # needed. An existing checkout at the pin is left untouched.
@@ -30,6 +32,7 @@ dep() {
 mkdir -p .deps
 dep webrtc "$WEBRTC_REPO" "$WEBRTC_PIN"
 dep webcrypto "$WEBCRYPTO_REPO" "$WEBCRYPTO_PIN"
+dep websocket "$WEBSOCKET_REPO" "$WEBSOCKET_PIN"
 
 if [ "${SKIP_NODE:-}" != "1" ]; then
     # The webrtc sibling's jco host module resolves node-datachannel from

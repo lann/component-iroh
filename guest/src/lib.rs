@@ -38,7 +38,9 @@ pub mod tls;
 mod demo {
     use serde::{Deserialize, Serialize};
 
-    use crate::bindings::exports::lann::iroh_spike::demo::{Guest, Role, RunConfig, RunReport};
+    use crate::bindings::exports::lann::iroh_spike::demo::{
+        Guest, Role, RunConfig, RunReport, Transport,
+    };
     use crate::bindings::lann::webrtc_datachannels::connections::{
         DataChannel, DataChannelOptions, PeerConnection,
     };
@@ -84,9 +86,29 @@ mod demo {
             .await
             .map_err(signaling_error)?;
 
-            let (peer, channel, hello_id) = match config.role {
-                Role::Client => connect_offerer(&relay).await.map_err(signaling_error)?,
-                Role::Server => connect_answerer(&relay).await.map_err(signaling_error)?,
+            // The WebRTC wire needs the offer/answer/ICE dance; the relay
+            // wire is the connection already at hand.
+            let mut webrtc = None;
+            let hello_id = match config.transport {
+                Transport::Webrtc => {
+                    let (peer, channel, hello_id) = match config.role {
+                        Role::Client => connect_offerer(&relay).await.map_err(signaling_error)?,
+                        Role::Server => connect_answerer(&relay).await.map_err(signaling_error)?,
+                    };
+                    webrtc = Some((peer, channel));
+                    hello_id
+                }
+                Transport::Relay => {
+                    publish(&relay, &Signal::Done)
+                        .await
+                        .map_err(signaling_error)?;
+                    consume_hello(&relay).await.map_err(signaling_error)?
+                }
+            };
+
+            let wire = match &webrtc {
+                Some((_, channel)) => endpoint::Wire::Channel(channel),
+                None => endpoint::Wire::Relay(&relay),
             };
 
             let endpoint_role = match config.role {
@@ -95,7 +117,7 @@ mod demo {
                 },
                 Role::Server => endpoint::Role::Server,
             };
-            let outcome = endpoint::run(&identity, hello_id, &channel, endpoint_role).await?;
+            let outcome = endpoint::run(&identity, hello_id, &wire, endpoint_role).await?;
 
             // The handshake authenticated the peer's key; the relay only
             // *claimed* one. They must agree.
@@ -103,7 +125,9 @@ mod demo {
                 return Err("authenticated peer key differs from the signaled one".into());
             }
 
-            peer.close();
+            if let Some((peer, _)) = &webrtc {
+                peer.close();
+            }
             let _ = relay.close(None, "");
 
             Ok(RunReport {
@@ -324,6 +348,25 @@ mod demo {
             }
         }
         Ok(hello_id)
+    }
+
+    /// Consume the peer's signals to its `done`, expecting only its hello
+    /// (the relay wire has no offer/answer dance).
+    async fn consume_hello(relay: &Websocket) -> Result<[u8; 32], WebrtcError> {
+        let mut hello_id = None;
+        while let Some(signal) = recv_signal(relay).await? {
+            match signal {
+                Signal::Hello { endpoint_id } => {
+                    hello_id = Some(parse_endpoint_id(&endpoint_id)?);
+                }
+                other => {
+                    return Err(WebrtcError::InvalidSignaling(format!(
+                        "unexpected signal on the relay wire: {other:?}"
+                    )))
+                }
+            }
+        }
+        hello_id.ok_or_else(|| WebrtcError::Other("peer sent no hello".into()))
     }
 
     fn parse_endpoint_id(text: &str) -> Result<[u8; 32], WebrtcError> {

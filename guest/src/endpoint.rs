@@ -1,7 +1,8 @@
-//! The QUIC endpoint pump: quinn-proto driven over a WebRTC data channel.
+//! The QUIC endpoint pump: quinn-proto driven over a datagram wire — a
+//! WebRTC data channel or the relay connection.
 //!
 //! One task drives everything (component-model async is a single-threaded
-//! cooperative loop). The two long-lived import futures — the channel
+//! cooperative loop). The two long-lived import futures — the wire
 //! `receive` and a fixed 50 ms clock tick — stay pinned across iterations:
 //! an in-flight import is a component-model subtask, and dropping one
 //! mid-flight cancels it in the host, which can discard a datagram the
@@ -23,7 +24,9 @@ use quinn_proto::{
 };
 
 use crate::bindings::lann::webrtc_datachannels::connections::DataChannel;
-use crate::bindings::lann::webrtc_datachannels::types::{Error as ChannelError, Message};
+use crate::bindings::lann::webrtc_datachannels::types::Message as ChannelMessage;
+use crate::bindings::lann::websocket::connections::Websocket;
+use crate::bindings::lann::websocket::types::Message as WsMessage;
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::crypto::sign::Identity;
 use crate::quic_glue::{
@@ -31,7 +34,59 @@ use crate::quic_glue::{
 };
 use crate::tls;
 
-/// The data channel carries no addresses; quinn still wants distinct,
+/// The datagram wire QUIC runs over: one binary message per QUIC datagram
+/// on either carrier. Text frames are not datagrams and are dropped.
+pub enum Wire<'a> {
+    /// An unreliable, unordered WebRTC data channel.
+    Channel(&'a DataChannel),
+    /// The relay connection: reliable and ordered, which QUIC tolerates
+    /// (it assumes neither).
+    Relay(&'a Websocket),
+}
+
+impl Wire<'_> {
+    /// The next inbound datagram; `Ok(None)` for a non-binary frame.
+    async fn receive(&self) -> Result<Option<Vec<u8>>, String> {
+        match self {
+            Wire::Channel(channel) => match channel.receive().await {
+                Ok(ChannelMessage::Binary(datagram)) => Ok(Some(datagram)),
+                Ok(ChannelMessage::String(_)) => Ok(None),
+                Err(err) => Err(format!("data channel: {err:?}")),
+            },
+            Wire::Relay(relay) => match relay.receive().await {
+                Ok(WsMessage::Binary(datagram)) => Ok(Some(datagram)),
+                Ok(WsMessage::String(_)) => Ok(None),
+                Err(err) => Err(format!("relay: {err:?}")),
+            },
+        }
+    }
+
+    async fn send(&self, payload: &[u8]) -> Result<(), String> {
+        match self {
+            Wire::Channel(channel) => channel
+                .send(ChannelMessage::Binary(payload.to_vec()))
+                .await
+                .map_err(|err| format!("data channel: {err:?}")),
+            Wire::Relay(relay) => relay
+                .send(WsMessage::Binary(payload.to_vec()))
+                .await
+                .map_err(|err| format!("relay: {err:?}")),
+        }
+    }
+
+    /// Initiate the wire's close (sync and idempotent on both carriers);
+    /// a pending `receive` then resolves with its closed error.
+    fn close(&self) {
+        match self {
+            Wire::Channel(channel) => channel.close(),
+            Wire::Relay(relay) => {
+                let _ = relay.close(None, "");
+            }
+        }
+    }
+}
+
+/// The wire carries no addresses; quinn still wants distinct,
 /// stable socket addresses per side.
 const CLIENT_ADDR: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1111);
@@ -83,11 +138,11 @@ fn endpoint_config() -> Result<Arc<EndpointConfig>, String> {
     ))))
 }
 
-/// Run one endpoint over `channel` until the demo completes.
+/// Run one endpoint over `wire` until the demo completes.
 pub async fn run(
     identity: &Identity,
     peer_endpoint_id: [u8; 32],
-    channel: &DataChannel,
+    wire: &Wire<'_>,
     role: Role,
 ) -> Result<Outcome, String> {
     let mut endpoint;
@@ -123,7 +178,7 @@ pub async fn run(
     let mut app = App::new(role);
     let mut buf = Vec::with_capacity(16 * 1024);
 
-    let mut recv = pin!(channel.receive().fuse());
+    let mut recv = pin!(wire.receive().fuse());
     let mut tick = pin!(monotonic_clock::wait_for(TICK_NS).fuse());
 
     // Every exit funnels through the teardown below the block: the pinned
@@ -168,7 +223,7 @@ pub async fn run(
                     match conn.poll_transmit(Instant::now(), 1, &mut buf) {
                         Some(transmit) => {
                             progressed = true;
-                            ok_or_break!('pump, send_datagram(channel, &buf[..transmit.size]).await);
+                            ok_or_break!('pump, wire.send(&buf[..transmit.size]).await);
                         }
                         None => break,
                     }
@@ -191,24 +246,24 @@ pub async fn run(
         select_biased! {
             received = recv => match received {
                 Ok(message) => {
-                    recv.set(channel.receive().fuse());
-                    if let Message::Binary(datagram) = message {
+                    recv.set(wire.receive().fuse());
+                    if let Some(datagram) = message {
                         ok_or_break!('pump, handle_datagram(
                             &mut endpoint,
                             &mut connection,
-                            channel,
+                            wire,
                             &mut buf,
                             datagram,
                         )
                         .await);
                     }
                 }
-                // The peer tearing its side down first closes the channel
+                // The peer tearing its side down first closes the wire
                 // under us; once this side is only lingering, that is
                 // completion, not failure.
                 Err(err) => break 'pump match (app.done_at.is_some(), connection.as_mut()) {
                     (true, Some((_, conn))) => app.finish(conn),
-                    _ => Err(channel_error(err)),
+                    _ => Err(err),
                 },
             },
             _ = tick => {
@@ -223,14 +278,14 @@ pub async fn run(
         }
     };
 
-    // Resolve the pinned imports: close the channel (sync, idempotent; a
-    // pending `receive` then resolves with `error.closed`), drain `recv`
+    // Resolve the pinned imports: close the wire (sync, idempotent; a
+    // pending `receive` then resolves with its closed error), drain `recv`
     // to its error, and let the final tick fire.
-    channel.close();
+    wire.close();
     while !recv.is_terminated() {
         select_biased! {
             received = recv => if received.is_ok() {
-                recv.set(channel.receive().fuse());
+                recv.set(wire.receive().fuse());
             },
             _ = tick => tick.set(monotonic_clock::wait_for(TICK_NS).fuse()),
         }
@@ -245,7 +300,7 @@ pub async fn run(
 async fn handle_datagram(
     endpoint: &mut Endpoint,
     connection: &mut Option<(ConnectionHandle, Connection)>,
-    channel: &DataChannel,
+    wire: &Wire<'_>,
     buf: &mut Vec<u8>,
     datagram: Vec<u8>,
 ) -> Result<(), String> {
@@ -273,22 +328,11 @@ async fn handle_datagram(
             }
         }
         Some(DatagramEvent::Response(transmit)) => {
-            send_datagram(channel, &buf[..transmit.size]).await?;
+            wire.send(&buf[..transmit.size]).await?;
         }
         None => {}
     }
     Ok(())
-}
-
-async fn send_datagram(channel: &DataChannel, payload: &[u8]) -> Result<(), String> {
-    channel
-        .send(Message::Binary(payload.to_vec()))
-        .await
-        .map_err(channel_error)
-}
-
-fn channel_error(err: ChannelError) -> String {
-    format!("data channel: {err:?}")
 }
 
 /// The demo application state machine, advanced by connection events.

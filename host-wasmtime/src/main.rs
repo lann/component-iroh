@@ -45,7 +45,9 @@ mod bindings {
     });
 }
 
-use bindings::exports::lann::iroh_spike::demo::{Role as DemoRole, RunConfig};
+use bindings::exports::lann::iroh_spike::demo::{
+    Role as DemoRole, RunConfig, Transport as DemoTransport,
+};
 
 struct Ctx {
     wasi: WasiCtx,
@@ -121,13 +123,14 @@ struct Cli {
     role: DemoRole,
     server: String,
     room: String,
+    transport: DemoTransport,
     message: String,
 }
 
 fn usage() -> wasmtime::Error {
     wasmtime::Error::msg(
         "usage: iroh-spike-host <component.wasm> --role <client|server> \
-         --server <relay-ws-url> --room <room> [--message M]",
+         --server <relay-ws-url> --room <room> [--transport <webrtc|relay>] [--message M]",
     )
 }
 
@@ -137,6 +140,7 @@ fn parse_args() -> Result<Cli> {
     let mut role = None;
     let mut server = None;
     let mut room = None;
+    let mut transport = DemoTransport::Webrtc;
     let mut message = "hello over QUIC over a data channel".to_string();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(usage);
@@ -150,6 +154,13 @@ fn parse_args() -> Result<Cli> {
             }
             "--server" => server = Some(value()?),
             "--room" => room = Some(value()?),
+            "--transport" => {
+                transport = match value()?.as_str() {
+                    "webrtc" => DemoTransport::Webrtc,
+                    "relay" => DemoTransport::Relay,
+                    _ => return Err(usage()),
+                }
+            }
             "--message" => message = value()?,
             _ => return Err(usage()),
         }
@@ -159,6 +170,7 @@ fn parse_args() -> Result<Cli> {
         role: role.ok_or_else(usage)?,
         server: server.ok_or_else(usage)?,
         room: room.ok_or_else(usage)?,
+        transport,
         message,
     })
 }
@@ -197,6 +209,7 @@ async fn main() -> Result<()> {
         server: cli.server,
         room: cli.room,
         role,
+        transport: cli.transport,
         message: cli.message,
     };
     let report = store
