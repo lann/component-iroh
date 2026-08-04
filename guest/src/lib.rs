@@ -14,7 +14,7 @@ pub mod relay_frames;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod bindings {
     wit_bindgen::generate!({
-        path: "../wit",
+        path: "wit",
         world: "iroh-spike",
         generate_all,
         // The websocket streaming methods are unused here and cannot

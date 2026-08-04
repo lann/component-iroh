@@ -34,7 +34,7 @@ use wasmtime_websocket::{WasiWebsocketCtx, WasiWebsocketCtxView, WasiWebsocketVi
 
 mod bindings {
     wasmtime::component::bindgen!({
-        path: "../wit",
+        path: "../guest/wit",
         world: "iroh-spike",
         imports: {
             default: async | store | trappable,

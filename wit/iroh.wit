@@ -1,0 +1,232 @@
+package lann:iroh@0.1.0;
+
+/// Structural types for the iroh endpoint surface.
+///
+/// Every non-resource type used by the package lives here. Structural
+/// types carry no host-side identity, so a single composition can freely
+/// share these definitions across multiple components; the stateful
+/// resources live in the `endpoint` interface.
+interface types {
+    /// An endpoint identity: exactly 32 bytes, an Ed25519 public key.
+    ///
+    /// The key is the address: connections are requested by, and
+    /// authenticated against, this value. A `list<u8>` of any other
+    /// length is rejected with `error.invalid-argument` wherever an
+    /// `endpoint-id` is accepted.
+    type endpoint-id = list<u8>;
+
+    /// One way a peer may be reached, mirroring upstream iroh's
+    /// `TransportAddr`.
+    ///
+    /// The `custom` case is the extension point: address kinds that do
+    /// not exist yet travel as an opaque payload under a numeric
+    /// transport ID, so they survive round trips through parties that
+    /// do not understand them.
+    variant transport-addr {
+        /// A relay server the peer keeps a connection open to (a URL).
+        relay(string),
+        /// A direct socket address, `ip:port`.
+        ip(string),
+        /// An address for a transport this package predates.
+        custom(custom-addr),
+    }
+
+    /// An opaque address for an unrecognized transport (upstream iroh's
+    /// `CustomAddr`).
+    record custom-addr {
+        /// The transport's numeric identifier.
+        id: u64,
+        /// Opaque address data, meaningful to that transport.
+        data: list<u8>,
+    }
+
+    /// Where to find a peer.
+    ///
+    /// Only `endpoint-id` identifies the peer; `addrs` are hints for
+    /// reaching it. A connection is authenticated against `endpoint-id`
+    /// regardless of which path reached the peer.
+    record endpoint-addr {
+        /// The peer's identity.
+        endpoint-id: endpoint-id,
+        /// Ways the peer may be reachable, in no particular order.
+        /// Unrecognized `custom` entries are ignored for dialing but
+        /// preserved.
+        addrs: list<transport-addr>,
+    }
+
+    /// The lifecycle state of a `connection`.
+    enum connection-state {
+        /// The handshake is in progress.
+        connecting,
+        /// The connection is open: streams operate normally.
+        open,
+        /// The connection is closed. Terminal.
+        closed,
+    }
+
+    /// Errors surfaced by the endpoint surface. The `string` payloads
+    /// are human-readable diagnostics for logging; do not match on
+    /// their contents.
+    variant error {
+        /// The endpoint, connection, or stream was closed before the
+        /// operation completed.
+        closed,
+        /// The peer reset the stream. The payload is the application
+        /// reset code, decimal-rendered.
+        reset(string),
+        /// Connection establishment failed: the relay was unreachable,
+        /// the handshake failed, the peer refused every offered ALPN,
+        /// or the attempt timed out.
+        connect-failed(string),
+        /// A supplied argument is invalid: an `endpoint-id` that is not
+        /// 32 bytes, or a malformed relay URL. The operation had no
+        /// effect.
+        invalid-argument(string),
+        /// An implementation-specific failure.
+        other(string),
+    }
+}
+
+/// The stateful endpoint surface: one identity, its connections, and
+/// their streams.
+interface endpoint {
+    use types.{endpoint-id, endpoint-addr, connection-state, error};
+
+    /// Configuration for `endpoint.bind`.
+    record endpoint-options {
+        /// The ALPNs this endpoint accepts. `accept` delivers only
+        /// connections whose negotiated ALPN is in this list.
+        alpns: list<list<u8>>,
+        /// The home relay this endpoint keeps a connection open to.
+        relay-url: option<string>,
+    }
+
+    /// A bound endpoint: an identity plus the machinery to connect and
+    /// accept.
+    resource endpoint {
+        /// Mint a fresh identity and stand the endpoint up.
+        ///
+        /// The identity's private key is created through the endpoint's
+        /// crypto import and is never present in this component's
+        /// memory. The identity's lifetime is this resource's: binding
+        /// again mints a new one. (Persistent identities are a planned
+        /// direction of the crypto provider's key storage, not a
+        /// surface change here.)
+        bind: static async func(options: endpoint-options) -> result<endpoint, error>;
+
+        /// This endpoint's identity.
+        id: func() -> endpoint-id;
+
+        /// Connect to a peer.
+        ///
+        /// Resolves once the QUIC handshake has completed and
+        /// authenticated `addr.endpoint-id`: a peer holding a different
+        /// key fails `connect-failed`, never connects. The connection's
+        /// ALPN is `alpn`, refused by the peer if it does not serve it.
+        connect: async func(addr: endpoint-addr, alpn: list<u8>) -> result<connection, error>;
+
+        /// The next accepted connection.
+        ///
+        /// The peer's identity is authenticated before delivery — read
+        /// it with `connection.peer` — and the negotiated ALPN is one
+        /// of `endpoint-options.alpns`. Concurrent calls are supported;
+        /// concurrently pending acceptors are each handed one
+        /// connection, in an implementation-defined order.
+        accept: async func() -> result<connection, error>;
+
+        /// Close the endpoint: new connections are refused and existing
+        /// ones close. Idempotent. Dropping the resource without
+        /// calling `close` implies `close`.
+        close: func();
+    }
+
+    /// An authenticated QUIC connection to one peer.
+    resource connection {
+        /// The authenticated peer identity. What this proves: the peer
+        /// holds the private key for this `endpoint-id`. Nothing else —
+        /// no naming, no authorization — is implied.
+        peer: func() -> endpoint-id;
+
+        /// The negotiated ALPN.
+        alpn: func() -> list<u8>;
+
+        /// The connection's current lifecycle state. `closed` is
+        /// terminal and latched.
+        state: func() -> connection-state;
+
+        /// Open a bidirectional stream. Resolves when stream credit is
+        /// available.
+        open-bi: async func() -> result<tuple<send-stream, recv-stream>, error>;
+
+        /// Open a unidirectional (outgoing) stream.
+        open-uni: async func() -> result<send-stream, error>;
+
+        /// The next peer-initiated bidirectional stream.
+        ///
+        /// Concurrent calls are supported; concurrently pending
+        /// acceptors are each handed one stream, in an
+        /// implementation-defined order.
+        accept-bi: async func() -> result<tuple<send-stream, recv-stream>, error>;
+
+        /// The next peer-initiated unidirectional stream.
+        accept-uni: async func() -> result<recv-stream, error>;
+
+        /// Close the connection with an application code and reason.
+        /// Idempotent; await `wait-closed` for completion. Dropping the
+        /// resource without calling `close` implies `close(0, "")`.
+        close: func(code: u32, reason: string);
+
+        /// Resolves once the connection is fully closed. Latched: once
+        /// closed, resolves immediately, any number of times.
+        wait-closed: async func();
+    }
+
+    /// The send half of a QUIC stream.
+    resource send-stream {
+        /// Write `bytes`, applying the stream's flow-control
+        /// backpressure through the async ABI. Resolves when the bytes
+        /// are accepted for delivery, not when they are delivered.
+        write: async func(bytes: list<u8>) -> result<_, error>;
+
+        /// Finish the stream: a FIN after all accepted writes. No
+        /// writes may follow.
+        finish: func() -> result<_, error>;
+
+        /// Abandon the stream, notifying the peer with `code`.
+        reset: func(code: u32);
+
+        /// Send the whole remaining payload through a byte stream,
+        /// then finish. One-shot: after this call the resource accepts
+        /// no further writes; the returned future resolves when every
+        /// byte has been accepted and the FIN sent.
+        write-via-stream: async func(data: stream<u8>) -> result<_, error>;
+    }
+
+    /// The receive half of a QUIC stream.
+    resource recv-stream {
+        /// Up to `max` bytes of the stream, in order; `none` at the
+        /// peer's FIN.
+        read: async func(max: u32) -> result<option<list<u8>>, error>;
+
+        /// Stop reading, notifying the peer with `code`.
+        stop: func(code: u32);
+
+        /// Take the stream's remaining bytes as a byte stream. May be
+        /// called once: after it, any call to it or to `read` fails
+        /// with `error.other`. The returned stream ends at the peer's
+        /// FIN.
+        read-via-stream: func() -> result<stream<u8>, error>;
+    }
+}
+
+/// One iroh endpoint: transports and time in, peer connectivity out.
+///
+/// The crypto imports (`lann:webcrypto`) are consumed by the
+/// implementation directly and do not appear here; `wasi:sockets` UDP
+/// joins the imports when the native direct path lands.
+world iroh-endpoint {
+    import lann:webrtc-datachannels/connections@0.1.0;
+    import lann:websocket/connections@0.1.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    export endpoint;
+}
