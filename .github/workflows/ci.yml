@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The full gate: checks, probes, and the cross-host pairing matrix — the
+  # same `just ci` a developer runs.
+  ci:
+    runs-on: ubuntu-latest
+    # QUIC/WebRTC handshakes can hang; cap the job so a stuck run fails
+    # fast instead of waiting for the default 6h limit.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        # The toolchain version and wasm target are pinned in
+        # rust-toolchain.toml; `rustup show` installs exactly those.
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        # Before the cargo cache step: the cache keys on the workspaces'
+        # lockfiles, and the .deps/iroh checkout must exist to be keyed.
+        run: ./scripts/setup.sh
+        # cargo-binstall resolves releases through api.github.com;
+        # unauthenticated requests share a 60/hour per-IP limit that pooled
+        # runner IPs exhaust. The token moves it to the per-token limit.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+          # The upstream iroh-relay builds into its own checkout's target.
+          workspaces: |
+            . -> target
+            .deps/iroh -> target
+          # Save only on main: PR jobs restore but never save, so PR
+          # branches don't churn the cache entries every run depends on.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run the gate
+        run: just ci
