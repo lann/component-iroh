@@ -1,20 +1,24 @@
 //! The `lann:iroh` endpoint component: `connect`/`accept` by endpoint ID,
-//! QUIC end-to-end, over the iroh relay wire.
+//! QUIC end-to-end, over the iroh relay wire and direct UDP.
 //!
-//! One `bind` mints an identity, opens the home relay connection, and
-//! spawns a detached pump task that owns all I/O: relayed datagrams in and
-//! out, quinn's timers, and the wake-ups for every future a resource
-//! method parked. Resource methods mutate the shared quinn state directly
-//! and kick the pump to flush the consequences.
+//! One `bind` mints an identity, opens the home relay connection, binds
+//! the UDP socket when asked, and spawns a detached pump task that owns
+//! all I/O: relay and UDP datagrams in and out, quinn's timers, and the
+//! wake-ups for every future a resource method parked. Resource methods
+//! mutate the shared quinn state directly and kick the pump to flush the
+//! consequences.
 //!
 //! v0 narrowings (each a recorded latitude, not a design ruling): the
-//! relay wire is the only path (`ip` and `custom` address entries are
-//! ignored, WebRTC and UDP land as additional wires behind the same
-//! surface), one relay per endpoint (dialing a peer on a different relay
-//! fails `connect-failed`), and `bind` requires a relay URL.
+//! wires are the relay and, when `udp-bind-addr` is set, direct UDP —
+//! `connect` dials the first parseable `ip` entry when a socket exists,
+//! with no relay fallback or racing; `custom` entries are ignored;
+//! WebRTC lands as another wire behind the same surface; one relay per
+//! endpoint (dialing a peer on a different relay fails `connect-failed`);
+//! and `bind` requires a relay URL.
 
 mod endpoint_impl;
 mod relay;
+mod udp;
 
 pub(crate) mod bindings {
     wit_bindgen::generate!({

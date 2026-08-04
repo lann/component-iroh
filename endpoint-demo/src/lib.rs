@@ -31,12 +31,17 @@ impl Guest for Component {
         let endpoint = Endpoint::bind(EndpointOptions {
             alpns: vec![ALPN.to_vec()],
             relay_url: Some(config.relay_url.clone()),
+            udp_bind_addr: config.udp_bind.clone(),
         })
         .await
         .map_err(fail("bind"))?;
 
         // The driver hands this ID to the peer process.
         println!("endpoint-id {}", hex::encode(endpoint.id()));
+        // And this address to a peer that should dial direct.
+        if let Some(addr) = endpoint.direct_addr() {
+            println!("direct-addr {addr}");
+        }
         let _ = std::io::stdout().flush();
 
         let report = match config.role {
@@ -64,12 +69,17 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
         .as_ref()
         .map(|a| a.as_bytes().to_vec())
         .unwrap_or_else(|| ALPN.to_vec());
+    let mut addrs = Vec::new();
+    if let Some(direct) = &config.direct {
+        addrs.push(TransportAddr::Ip(direct.clone()));
+    }
+    addrs.push(TransportAddr::Relay(config.relay_url.clone()));
     let started = Instant::now();
     let conn = endpoint
         .connect(
             EndpointAddr {
                 endpoint_id: peer.clone(),
-                addrs: vec![TransportAddr::Relay(config.relay_url.clone())],
+                addrs,
             },
             alpn,
         )

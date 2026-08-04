@@ -19,6 +19,14 @@ interface demo {
         /// a failure-path probe knob (an ALPN the server does not serve
         /// must fail the handshake, not connect).
         alpn: option<string>,
+        /// The `ip:port` to bind the endpoint's UDP socket to. The
+        /// bound address is written to stdout as `direct-addr <ip:port>`
+        /// after binding.
+        udp-bind: option<string>,
+        /// A direct `ip:port` for the server peer. The client adds it
+        /// to the peer's address ahead of the relay entry, so the
+        /// connection prefers the UDP path.
+        direct: option<string>,
         /// The application message the client sends (the server echoes it).
         message: string,
     }

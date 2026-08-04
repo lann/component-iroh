@@ -99,6 +99,12 @@ interface endpoint {
         alpns: list<list<u8>>,
         /// The home relay this endpoint keeps a connection open to.
         relay-url: option<string>,
+        /// The `ip:port` to bind a UDP socket to, enabling the direct
+        /// path: `endpoint-addr.addrs` `ip` entries become dialable and
+        /// direct peers can dial in. `none` binds no socket. A port of
+        /// zero picks a free port; read the result with
+        /// `endpoint.direct-addr`.
+        udp-bind-addr: option<string>,
     }
 
     /// A bound endpoint: an identity plus the machinery to connect and
@@ -116,6 +122,10 @@ interface endpoint {
 
         /// This endpoint's identity.
         id: func() -> endpoint-id;
+
+        /// The bound UDP socket's local `ip:port`, when
+        /// `endpoint-options.udp-bind-addr` was set.
+        direct-addr: func() -> option<string>;
 
         /// Connect to a peer.
         ///
@@ -222,11 +232,13 @@ interface endpoint {
 /// One iroh endpoint: transports and time in, peer connectivity out.
 ///
 /// The crypto imports (`lann:webcrypto`) are consumed by the
-/// implementation directly and do not appear here; `wasi:sockets` UDP
-/// joins the imports when the native direct path lands.
+/// implementation directly and do not appear here. The UDP direct
+/// path uses `wasi:sockets/types@0.3.0`, whose `udp-socket` resource
+/// carries the socket operations in the 0.3 draft.
 world iroh-endpoint {
     import lann:webrtc-datachannels/connections@0.1.0;
     import lann:websocket/connections@0.1.0;
     import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:sockets/types@0.3.0;
     export endpoint;
 }

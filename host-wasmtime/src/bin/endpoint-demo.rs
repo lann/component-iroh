@@ -85,13 +85,16 @@ struct Cli {
     relay: String,
     peer: Option<String>,
     alpn: Option<String>,
+    udp_bind: Option<String>,
+    direct: Option<String>,
     message: String,
 }
 
 fn usage() -> wasmtime::Error {
     wasmtime::Error::msg(
         "usage: endpoint-demo <composed.wasm> --role <client|server> \
-         --relay <relay-url> [--peer <endpoint-id-hex>] [--alpn A] [--message M]",
+         --relay <relay-url> [--peer <endpoint-id-hex>] [--alpn A] \
+         [--udp-bind <ip:port>] [--direct <ip:port>] [--message M]",
     )
 }
 
@@ -102,6 +105,8 @@ fn parse_args() -> Result<Cli> {
     let mut relay = None;
     let mut peer = None;
     let mut alpn = None;
+    let mut udp_bind = None;
+    let mut direct = None;
     let mut message = "hello through the endpoint surface".to_string();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(usage);
@@ -116,6 +121,8 @@ fn parse_args() -> Result<Cli> {
             "--relay" => relay = Some(value()?),
             "--peer" => peer = Some(value()?),
             "--alpn" => alpn = Some(value()?),
+            "--udp-bind" => udp_bind = Some(value()?),
+            "--direct" => direct = Some(value()?),
             "--message" => message = value()?,
             _ => return Err(usage()),
         }
@@ -126,6 +133,8 @@ fn parse_args() -> Result<Cli> {
         relay: relay.ok_or_else(usage)?,
         peer,
         alpn,
+        udp_bind,
+        direct,
         message,
     })
 }
@@ -148,7 +157,9 @@ async fn main() -> Result<()> {
     wasmtime_websocket::add_to_linker(&mut linker)?;
 
     let mut wasi = WasiCtx::builder();
-    wasi.inherit_stdio().inherit_env();
+    // The UDP direct path binds and dials through `wasi:sockets`; this
+    // demo driver grants it the host network wholesale.
+    wasi.inherit_stdio().inherit_env().inherit_network();
     let mut store = Store::new(
         &engine,
         Ctx {
@@ -167,6 +178,8 @@ async fn main() -> Result<()> {
         role,
         peer: cli.peer,
         alpn: cli.alpn,
+        udp_bind: cli.udp_bind,
+        direct: cli.direct,
         message: cli.message,
     };
     let report = store

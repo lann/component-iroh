@@ -43,6 +43,7 @@ use crate::bindings::lann::iroh::types::{ConnectionState, EndpointAddr, Error, T
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::bindings::wit_stream;
 use crate::relay::RelayConn;
+use crate::udp::UdpWire;
 use crate::Component;
 use wit_bindgen::rt::async_support::StreamReader;
 
@@ -75,7 +76,8 @@ struct State {
     addr_to_peer: HashMap<SocketAddr, [u8; 32]>,
     next_host: u32,
     accept_queue: VecDeque<ConnectionHandle>,
-    outbound: VecDeque<([u8; 32], Vec<u8>)>,
+    relay_outbound: VecDeque<([u8; 32], Vec<u8>)>,
+    udp_outbound: VecDeque<(SocketAddr, Vec<u8>)>,
     closed: bool,
     closed_at: Option<Instant>,
     /// Set when the relay connection died; every operation fails from
@@ -85,10 +87,14 @@ struct State {
 
 struct ConnEntry {
     conn: QuinnConnection,
-    /// The peer this connection speaks to: the dialed identity on the
-    /// client side, the relay-authenticated datagram source on the
-    /// accepted side. The TLS identity must match it.
-    peer: [u8; 32],
+    /// The identity this connection must authenticate as, when one is
+    /// known up front: the dialed identity on the client side, the
+    /// relay-authenticated datagram source on relay-accepted connections.
+    /// `None` on direct-path accepted connections, whose identity has no
+    /// out-of-band claim — the TLS-authenticated key is adopted instead.
+    expected_peer: Option<[u8; 32]>,
+    /// The authenticated peer identity, set at `Connected`.
+    peer: Option<[u8; 32]>,
     accepted_side: bool,
     connected: bool,
     alpn: Vec<u8>,
@@ -99,10 +105,11 @@ struct ConnEntry {
 }
 
 impl ConnEntry {
-    fn new(conn: QuinnConnection, peer: [u8; 32], accepted_side: bool) -> Self {
+    fn new(conn: QuinnConnection, expected_peer: Option<[u8; 32]>, accepted_side: bool) -> Self {
         Self {
             conn,
-            peer,
+            expected_peer,
+            peer: None,
             accepted_side,
             connected: false,
             alpn: Vec::new(),
@@ -123,7 +130,8 @@ impl State {
             addr_to_peer: HashMap::new(),
             next_host: 0,
             accept_queue: VecDeque::new(),
-            outbound: VecDeque::new(),
+            relay_outbound: VecDeque::new(),
+            udp_outbound: VecDeque::new(),
             closed: false,
             closed_at: None,
             dead: None,
@@ -132,6 +140,12 @@ impl State {
 
     /// The stable fake socket address standing in for `peer` (the relay
     /// wire has no addresses; quinn wants distinct, stable ones).
+    ///
+    /// Hazard: the fake space is `10.77.x.y:4433`. `drain()` routes
+    /// transmits to the relay by fake-addr lookup, so a real peer that
+    /// is genuinely reachable at such an address would be misrouted.
+    /// Loopback and public-internet peers cannot collide; a 10/8
+    /// deployment could.
     fn addr_for_peer(&mut self, peer: [u8; 32]) -> SocketAddr {
         if let Some(addr) = self.peer_to_addr.get(&peer) {
             return *addr;
@@ -165,7 +179,8 @@ impl State {
             conns,
             addr_to_peer,
             accept_queue,
-            outbound,
+            relay_outbound,
+            udp_outbound,
             ..
         } = self;
         for (handle, entry) in conns.iter_mut() {
@@ -190,8 +205,14 @@ impl State {
                     match entry.conn.poll_transmit(now, 1, &mut buf) {
                         Some(transmit) => {
                             progressed = true;
-                            if let Some(peer) = addr_to_peer.get(&transmit.destination) {
-                                outbound.push_back((*peer, buf[..transmit.size].to_vec()));
+                            match addr_to_peer.get(&transmit.destination) {
+                                Some(peer) => {
+                                    relay_outbound.push_back((*peer, buf[..transmit.size].to_vec()))
+                                }
+                                None => udp_outbound.push_back((
+                                    transmit.destination,
+                                    buf[..transmit.size].to_vec(),
+                                )),
                             }
                         }
                         None => break,
@@ -208,9 +229,17 @@ impl State {
         }
     }
 
-    fn handle_datagram(&mut self, source: [u8; 32], payload: Vec<u8>) {
-        let now = Instant::now();
+    fn handle_relay_datagram(&mut self, source: [u8; 32], payload: Vec<u8>) {
         let addr = self.addr_for_peer(source);
+        self.handle_datagram(addr, Some(source), payload);
+    }
+
+    fn handle_udp_datagram(&mut self, remote: SocketAddr, payload: Vec<u8>) {
+        self.handle_datagram(remote, None, payload);
+    }
+
+    fn handle_datagram(&mut self, addr: SocketAddr, source: Option<[u8; 32]>, payload: Vec<u8>) {
+        let now = Instant::now();
         let mut buf = Vec::new();
         match self.quinn.handle(
             now,
@@ -237,17 +266,22 @@ impl State {
                     }
                     Err(err) => {
                         if let Some(transmit) = err.response {
-                            self.outbound
-                                .push_back((source, buf[..transmit.size].to_vec()));
+                            self.push_response(addr, source, &buf[..transmit.size]);
                         }
                     }
                 }
             }
             Some(DatagramEvent::Response(transmit)) => {
-                self.outbound
-                    .push_back((source, buf[..transmit.size].to_vec()));
+                self.push_response(addr, source, &buf[..transmit.size]);
             }
             None => {}
+        }
+    }
+
+    fn push_response(&mut self, addr: SocketAddr, source: Option<[u8; 32]>, payload: &[u8]) {
+        match source {
+            Some(peer) => self.relay_outbound.push_back((peer, payload.to_vec())),
+            None => self.udp_outbound.push_back((addr, payload.to_vec())),
         }
     }
 
@@ -303,8 +337,9 @@ fn on_event(
                         .first()
                         .and_then(|c| tls::endpoint_id_from_spki(c.as_ref()))
                 });
-            match tls_peer {
-                Some(id) if id == entry.peer => {
+            match (tls_peer, entry.expected_peer) {
+                (Some(id), expected) if expected.is_none() || expected == Some(id) => {
+                    entry.peer = Some(id);
                     entry.connected = true;
                     if entry.accepted_side {
                         accept_queue.push_back(handle);
@@ -353,14 +388,15 @@ fn on_event(
 /// pinned across iterations and are resolved before the task returns (an
 /// in-flight import is a component-model subtask; jco traps on cancelling
 /// one — see the spike's teardown discipline).
-async fn pump(shared: Shared, relay: Rc<RelayConn>) {
+async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
     let mut recv = pin!(relay.recv_datagram().fuse());
+    let mut udp_recv = pin!(udp_receive(udp.clone()).fuse());
     let mut tick = pin!(monotonic_clock::wait_for(TICK_NS).fuse());
 
     'pump: loop {
         shared.borrow_mut().drain();
         loop {
-            let item = shared.borrow_mut().outbound.pop_front();
+            let item = shared.borrow_mut().relay_outbound.pop_front();
             match item {
                 Some((peer, datagram)) => {
                     if relay.send_datagram(&peer, &datagram).await.is_err() {
@@ -369,6 +405,17 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>) {
                     }
                 }
                 None => break,
+            }
+        }
+        loop {
+            let item = shared.borrow_mut().udp_outbound.pop_front();
+            match (item, &udp) {
+                (Some((remote, datagram)), Some(wire)) => {
+                    // A send failure on UDP is datagram loss, not death.
+                    let _ = wire.send(remote, &datagram).await;
+                }
+                (Some(_), None) => {}
+                (None, _) => break,
             }
         }
 
@@ -395,11 +442,23 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>) {
                     recv.set(relay.recv_datagram().fuse());
                     shared
                         .borrow_mut()
-                        .handle_datagram(datagram.source, datagram.payload);
+                        .handle_relay_datagram(datagram.source, datagram.payload);
                 }
                 Err(err) => {
                     shared.borrow_mut().mark_dead(&err);
                     break 'pump;
+                }
+            },
+            received = udp_recv => {
+                if let Ok((payload, remote)) = received {
+                    udp_recv.set(udp_receive(udp.clone()).fuse());
+                    shared.borrow_mut().handle_udp_datagram(remote, payload);
+                } else {
+                    // The socket died; the relay path continues. Park the
+                    // slot terminated — a pending-forever future here
+                    // would hang the teardown await below (the self-wake
+                    // cannot resolve it through a dead socket).
+                    udp_recv.set(futures::future::Fuse::terminated());
                 }
             },
             _ = tick => {
@@ -409,18 +468,39 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>) {
         }
     }
 
-    // Resolve the pinned imports before the task ends.
+    // Resolve the pinned imports before the task ends: close the relay
+    // (its pending receive resolves with the closed error), self-wake the
+    // UDP socket (a zero-length datagram to our own address resolves its
+    // pending receive), and let the final tick fire.
     relay.close();
+    if let Some(wire) = &udp {
+        let _ = wire.self_wake().await;
+    }
     while !recv.is_terminated() {
         select_biased! {
             received = recv => if received.is_ok() {
                 recv.set(relay.recv_datagram().fuse());
             },
+            _ = udp_recv => {}
             _ = tick => tick.set(monotonic_clock::wait_for(TICK_NS).fuse()),
         }
     }
+    if udp.is_some() && !udp_recv.is_terminated() {
+        udp_recv.as_mut().await.ok();
+    }
     if !tick.is_terminated() {
         tick.as_mut().await;
+    }
+}
+
+/// The next UDP datagram, or pending-forever without a socket (the pump's
+/// select needs one future shape either way).
+async fn udp_receive(
+    udp: Option<Rc<UdpWire>>,
+) -> Result<(Vec<u8>, SocketAddr), crate::bindings::wasi::sockets::types::ErrorCode> {
+    match udp {
+        Some(wire) => wire.receive().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -446,6 +526,7 @@ pub struct EndpointRes {
     shared: Shared,
     identity: Rc<Identity>,
     relay_url: String,
+    udp: Option<Rc<UdpWire>>,
 }
 
 impl Drop for EndpointRes {
@@ -520,18 +601,30 @@ impl GuestEndpoint for EndpointRes {
             None,
         );
 
+        let udp = match &options.udp_bind_addr {
+            Some(bind_addr) => Some(Rc::new(
+                UdpWire::bind(bind_addr).map_err(Error::InvalidArgument)?,
+            )),
+            None => None,
+        };
+
         let shared = Rc::new(RefCell::new(State::new(quinn)));
-        wit_bindgen::spawn_local(pump(shared.clone(), Rc::new(relay)));
+        wit_bindgen::spawn_local(pump(shared.clone(), Rc::new(relay), udp.clone()));
 
         Ok(Endpoint::new(EndpointRes {
             shared,
             identity: Rc::new(identity),
             relay_url,
+            udp,
         }))
     }
 
     fn id(&self) -> Vec<u8> {
         self.identity.endpoint_id.to_vec()
+    }
+
+    fn direct_addr(&self) -> Option<String> {
+        self.udp.as_ref().map(|wire| wire.local_addr().to_string())
     }
 
     async fn connect(&self, addr: EndpointAddr, alpn: Vec<u8>) -> Result<Connection, Error> {
@@ -540,13 +633,26 @@ impl GuestEndpoint for EndpointRes {
             .as_slice()
             .try_into()
             .map_err(|_| Error::InvalidArgument("endpoint id is not 32 bytes".into()))?;
+        // The direct path wins when it exists: the first parseable `ip`
+        // entry, dialed over our bound socket. No racing yet — a
+        // direct-dialed peer that never answers fails by timeout rather
+        // than falling back to the relay.
+        let mut direct: Option<SocketAddr> = None;
         for entry in &addr.addrs {
-            if let TransportAddr::Relay(url) = entry {
-                if url.trim_end_matches('/') != self.relay_url.trim_end_matches('/') {
-                    return Err(Error::ConnectFailed(
-                        "cross-relay dialing is not implemented yet".into(),
-                    ));
+            match entry {
+                TransportAddr::Relay(url) => {
+                    if url.trim_end_matches('/') != self.relay_url.trim_end_matches('/') {
+                        return Err(Error::ConnectFailed(
+                            "cross-relay dialing is not implemented yet".into(),
+                        ));
+                    }
                 }
+                TransportAddr::Ip(text) => {
+                    if direct.is_none() && self.udp.is_some() {
+                        direct = text.parse().ok();
+                    }
+                }
+                TransportAddr::Custom(_) => {}
             }
         }
 
@@ -561,12 +667,16 @@ impl GuestEndpoint for EndpointRes {
             if st.dead.is_some() || st.closed {
                 return Err(Error::Closed);
             }
-            let fake_addr = st.addr_for_peer(peer);
+            let remote = match direct {
+                Some(real) => real,
+                None => st.addr_for_peer(peer),
+            };
             let (handle, conn) = st
                 .quinn
-                .connect(Instant::now(), config, fake_addr, tls::SERVER_NAME)
+                .connect(Instant::now(), config, remote, tls::SERVER_NAME)
                 .map_err(|e| Error::ConnectFailed(e.to_string()))?;
-            st.conns.insert(handle, ConnEntry::new(conn, peer, false));
+            st.conns
+                .insert(handle, ConnEntry::new(conn, Some(peer), false));
             handle
         };
 
@@ -669,7 +779,7 @@ impl ConnectionRes {
 
 impl GuestConnection for ConnectionRes {
     fn peer(&self) -> Vec<u8> {
-        self.with_entry(|e| e.peer.to_vec())
+        self.with_entry(|e| e.peer.map(|p| p.to_vec()).unwrap_or_default())
     }
 
     fn alpn(&self) -> Vec<u8> {

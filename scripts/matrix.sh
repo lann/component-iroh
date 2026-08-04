@@ -31,7 +31,8 @@ sleep 1
 # assert both reported OK.
 #   run_pair <name> <server-cmd...> -- <client-cmd...>
 # The client command receives the server's endpoint id appended after
-# its own --peer flag.
+# its own --peer flag. A literal `@DIRECT@` client argument is replaced
+# by the server's scraped `direct-addr <ip:port>` line (the UDP rows).
 run_pair() {
     local name=$1; shift
     local server=()
@@ -53,6 +54,25 @@ run_pair() {
         FAILURES=$((FAILURES + 1))
         return
     fi
+
+    local i
+    for i in "${!client[@]}"; do
+        if [ "${client[$i]}" = "@DIRECT@" ]; then
+            local direct=""
+            for _ in $(seq 1 60); do
+                direct=$(grep -m1 "^direct-addr" "$LOGDIR/$name-server.log" 2>/dev/null | awk '{print $2}')
+                [ -n "$direct" ] && break
+                sleep 0.5
+            done
+            if [ -z "$direct" ]; then
+                echo "FAIL $name (server printed no direct-addr)"
+                kill "$server_pid" 2>/dev/null
+                FAILURES=$((FAILURES + 1))
+                return
+            fi
+            client[$i]="$direct"
+        fi
+    done
 
     "${client[@]}" "$server_id" > "$LOGDIR/$name-client.log" 2>&1
     local client_status=$?
@@ -110,6 +130,16 @@ run_pair "endpoint-relay-wasmtime-wasmtime" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" -- \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
         --message "matrix endpoint" --peer
+
+# The UDP direct path: the server binds a real socket (port 0 =
+# ephemeral) and the client dials the scraped address. connect()
+# prefers the ip entry with no relay fallback, so a passing echo is
+# the assertion that QUIC flowed over UDP.
+run_pair "endpoint-udp-wasmtime-wasmtime" \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
+        --udp-bind 127.0.0.1:0 -- \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
+        --message "matrix udp" --direct @DIRECT@ --peer
 
 # --- endpoint surface: failure paths must fail closed, in bounded time ----
 #
