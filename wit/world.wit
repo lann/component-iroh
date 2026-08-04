@@ -24,16 +24,21 @@ interface demo {
 
     /// One run's inputs.
     record run-config {
-        /// Relay server base URL, e.g. `ws://127.0.0.1:8090`. The relay
-        /// pairs the two processes and forwards their signaling; both
-        /// processes must name the same server.
+        /// The iroh relay server's base URL, e.g. `http://127.0.0.1:3340`
+        /// (an `iroh-relay` dev-mode server). Both processes must name the
+        /// same relay. `http(s)` schemes are mapped onto `ws(s)`.
         server: string,
-        /// Relay room both processes join.
-        room: string,
         /// This process's role.
         role: role,
         /// The wire QUIC runs over.
         transport: transport,
+        /// The server peer's endpoint ID (its Ed25519 public key,
+        /// hex-encoded). Required on the client — it addresses relayed
+        /// frames and pins the TLS connection. A server needs none: it
+        /// learns the client's ID from the relay-authenticated source of
+        /// the first inbound frame and cross-checks it against the
+        /// handshake.
+        peer: option<string>,
         /// The application message the client sends (the server echoes it).
         message: string,
     }
@@ -54,8 +59,11 @@ interface demo {
         received: string,
     }
 
-    /// Drive one full run: signal, connect, exchange one message each way,
-    /// and report. Fails with a human-readable reason.
+    /// Drive one full run: connect to the relay, connect to the peer,
+    /// exchange one message each way, and report. The process's own
+    /// endpoint ID is written to stdout as `endpoint-id <hex>` before any
+    /// connection is attempted, so a driver can hand it to the peer.
+    /// Fails with a human-readable reason.
     run: async func(config: run-config) -> result<run-report, string>;
 }
 

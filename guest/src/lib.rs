@@ -9,6 +9,7 @@
 
 pub mod crypto;
 pub mod quic_glue;
+pub mod relay_frames;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod bindings {
@@ -32,10 +33,15 @@ pub(crate) mod bindings {
 #[cfg(target_arch = "wasm32")]
 mod endpoint;
 #[cfg(target_arch = "wasm32")]
+mod relay;
+#[cfg(target_arch = "wasm32")]
 pub mod tls;
 
 #[cfg(target_arch = "wasm32")]
 mod demo {
+    use std::cell::Cell;
+    use std::io::Write;
+
     use serde::{Deserialize, Serialize};
 
     use crate::bindings::exports::lann::iroh_spike::demo::{
@@ -45,12 +51,11 @@ mod demo {
         DataChannel, DataChannelOptions, PeerConnection,
     };
     use crate::bindings::lann::webrtc_datachannels::types::{
-        Error as WebrtcError, IceCandidate, SdpType, SessionDescription,
+        IceCandidate, SdpType, SessionDescription,
     };
-    use crate::bindings::lann::websocket::connections::Websocket;
-    use crate::bindings::lann::websocket::types::{Error as WebsocketError, Message as WsMessage};
     use crate::crypto::sign::Identity;
     use crate::endpoint;
+    use crate::relay::RelayConn;
 
     pub struct Component;
 
@@ -58,57 +63,50 @@ mod demo {
         async fn run(config: RunConfig) -> Result<RunReport, String> {
             let identity = Identity::generate().await?;
 
-            // Signaling rides a relay connection: the same room-paired
-            // frame forwarding the designed endpoint's relay leg provides.
-            // The relay names its slots a/b; the demo client takes a.
-            let slot = match config.role {
-                Role::Client => "a",
-                Role::Server => "b",
+            // The driver hands this ID to the peer process (iroh pairing
+            // is by endpoint ID; discovery does this in the design).
+            println!("endpoint-id {}", hex::encode(identity.endpoint_id));
+            let _ = std::io::stdout().flush();
+
+            let peer_arg = match &config.peer {
+                Some(text) => Some(parse_endpoint_id(text)?),
+                None => None,
             };
-            let url = format!(
-                "{}/rooms/{}/{}",
-                config.server.trim_end_matches('/'),
-                config.room,
-                slot
-            );
-            let relay = Websocket::connect(url, Vec::new())
-                .await
-                .map_err(signaling_error)?;
+            if matches!(config.role, Role::Client) && peer_arg.is_none() {
+                return Err("the client role requires the server's endpoint id (peer)".into());
+            }
 
-            // Identities travel over the relay first: the client needs the
-            // server's key before it can pin the TLS connection to it.
-            publish(
-                &relay,
-                &Signal::Hello {
-                    endpoint_id: hex::encode(identity.endpoint_id),
-                },
-            )
-            .await
-            .map_err(signaling_error)?;
+            let relay = RelayConn::connect(&config.server, &identity).await?;
 
-            // The WebRTC wire needs the offer/answer/ICE dance; the relay
-            // wire is the connection already at hand.
+            // The WebRTC wire needs the offer/answer/ICE dance, carried as
+            // signal datagrams through the relay; the relay wire needs no
+            // signaling at all.
             let mut webrtc = None;
-            let hello_id = match config.transport {
-                Transport::Webrtc => {
-                    let (peer, channel, hello_id) = match config.role {
-                        Role::Client => connect_offerer(&relay).await.map_err(signaling_error)?,
-                        Role::Server => connect_answerer(&relay).await.map_err(signaling_error)?,
-                    };
-                    webrtc = Some((peer, channel));
-                    hello_id
-                }
-                Transport::Relay => {
-                    publish(&relay, &Signal::Done)
-                        .await
-                        .map_err(signaling_error)?;
-                    consume_hello(&relay).await.map_err(signaling_error)?
-                }
-            };
+            let mut signaled_peer = None;
+            if config.transport == Transport::Webrtc {
+                let signaling = Signaling {
+                    relay: &relay,
+                    peer: Cell::new(peer_arg),
+                };
+                let pair = match config.role {
+                    Role::Client => connect_offerer(&signaling).await?,
+                    Role::Server => connect_answerer(&signaling).await?,
+                };
+                signaled_peer = Some(
+                    signaling
+                        .peer
+                        .get()
+                        .ok_or("signaling completed without a peer")?,
+                );
+                webrtc = Some(pair);
+            }
 
             let wire = match &webrtc {
                 Some((_, channel)) => endpoint::Wire::Channel(channel),
-                None => endpoint::Wire::Relay(&relay),
+                None => endpoint::Wire::Relay {
+                    conn: &relay,
+                    peer: Cell::new(peer_arg),
+                },
             };
 
             let endpoint_role = match config.role {
@@ -117,18 +115,24 @@ mod demo {
                 },
                 Role::Server => endpoint::Role::Server,
             };
-            let outcome = endpoint::run(&identity, hello_id, &wire, endpoint_role).await?;
+            let outcome = endpoint::run(&identity, peer_arg, &wire, endpoint_role).await?;
 
-            // The handshake authenticated the peer's key; the relay only
-            // *claimed* one. They must agree.
-            if outcome.peer_id != hello_id {
-                return Err("authenticated peer key differs from the signaled one".into());
+            // The handshake authenticated the peer’s key; the relay only
+            // authenticated who *relayed frames* to us. They must agree.
+            let expected = peer_arg
+                .or(signaled_peer)
+                .or_else(|| wire.peer())
+                .ok_or("finished without an expected peer identity")?;
+            if outcome.peer_id != expected {
+                return Err(
+                    "authenticated peer key differs from the relay-authenticated one".into(),
+                );
             }
 
             if let Some((peer, _)) = &webrtc {
                 peer.close();
             }
-            let _ = relay.close(None, "");
+            relay.close();
 
             Ok(RunReport {
                 endpoint_id: hex::encode(identity.endpoint_id),
@@ -142,7 +146,7 @@ mod demo {
 
     /// The channel configuration QUIC needs from the wire: a datagram
     /// carrier. Unordered, zero retransmissions — losses and reordering
-    /// are QUIC's to handle.
+    /// are QUIC’s to handle.
     fn quic_channel_options() -> DataChannelOptions {
         let options = DataChannelOptions::new();
         options.set_label("quic");
@@ -151,88 +155,117 @@ mod demo {
         options
     }
 
+    /// WebRTC signaling carried as relay datagrams: one JSON signal per
+    /// datagram, marked by a leading zero byte (never a valid first byte
+    /// of a QUIC packet, whose fixed bit is set), addressed to — and
+    /// filtered by — the relay-authenticated peer.
+    struct Signaling<'a> {
+        relay: &'a RelayConn,
+        /// The signaling peer: preset on the client, learned from the
+        /// first signal’s source on the server.
+        peer: Cell<Option<[u8; 32]>>,
+    }
+
+    const SIGNAL_PREFIX: u8 = 0x00;
+
+    impl Signaling<'_> {
+        async fn publish(&self, signal: &Signal) -> Result<(), String> {
+            let peer = self.peer.get().ok_or("no signaling peer yet")?;
+            let mut payload = vec![SIGNAL_PREFIX];
+            serde_json::to_writer(&mut payload, signal)
+                .map_err(|e| format!("encode signal: {e}"))?;
+            self.relay.send_datagram(&peer, &payload).await
+        }
+
+        /// The peer’s next signal; `none` once the peer sends `done`.
+        async fn recv(&self) -> Result<Option<Signal>, String> {
+            loop {
+                let datagram = self.relay.recv_datagram().await?;
+                match self.peer.get() {
+                    None => self.peer.set(Some(datagram.source)),
+                    Some(expected) if expected == datagram.source => {}
+                    Some(_) => continue,
+                }
+                let Some((&SIGNAL_PREFIX, json)) = datagram.payload.split_first() else {
+                    continue;
+                };
+                let signal =
+                    serde_json::from_slice(json).map_err(|e| format!("decode signal: {e}"))?;
+                match signal {
+                    Signal::Done => return Ok(None),
+                    other => return Ok(Some(other)),
+                }
+            }
+        }
+    }
+
     /// Offerer half: create the channel, drive offer/answer + trickle ICE
-    /// through the relay, return the connected pair and the peer's
-    /// claimed endpoint ID.
+    /// through the relay, return the connected pair.
     async fn connect_offerer(
-        relay: &Websocket,
-    ) -> Result<(PeerConnection, DataChannel, [u8; 32]), WebrtcError> {
+        signaling: &Signaling<'_>,
+    ) -> Result<(PeerConnection, DataChannel), String> {
         let peer = PeerConnection::new(None);
-        let channel = peer.create_data_channel(quic_channel_options())?;
+        let channel = peer
+            .create_data_channel(quic_channel_options())
+            .map_err(rtc)?;
 
-        let offer = peer.create_offer().await?;
+        let offer = peer.create_offer().await.map_err(rtc)?;
         let offer_sdp = offer.sdp.clone();
-        peer.set_local_description(offer).await?;
-        publish(relay, &Signal::Offer { sdp: offer_sdp }).await?;
-        publish_candidates(&peer, relay).await?;
-        publish(relay, &Signal::Done).await?;
+        peer.set_local_description(offer).await.map_err(rtc)?;
+        signaling.publish(&Signal::Offer { sdp: offer_sdp }).await?;
+        publish_candidates(&peer, signaling).await?;
+        signaling.publish(&Signal::Done).await?;
 
-        let hello_id = consume_signaling(&peer, relay).await?;
+        consume_signaling(&peer, signaling).await?;
 
-        peer.wait_connected().await?;
-        let hello_id = hello_id.ok_or_else(|| WebrtcError::Other("peer sent no hello".into()))?;
-        Ok((peer, channel, hello_id))
+        peer.wait_connected().await.map_err(rtc)?;
+        Ok((peer, channel))
     }
 
     /// Answerer half: adopt the offer, answer, and take the channel the
     /// offerer created.
     async fn connect_answerer(
-        relay: &Websocket,
-    ) -> Result<(PeerConnection, DataChannel, [u8; 32]), WebrtcError> {
+        signaling: &Signaling<'_>,
+    ) -> Result<(PeerConnection, DataChannel), String> {
         let peer = PeerConnection::new(None);
 
-        let hello_id = match recv_signal(relay).await? {
-            Some(Signal::Hello { endpoint_id }) => parse_endpoint_id(&endpoint_id)?,
-            other => {
-                return Err(WebrtcError::InvalidSignaling(format!(
-                    "expected hello, got {other:?}"
-                )))
-            }
-        };
-        let offer = match recv_signal(relay).await? {
+        let offer = match signaling.recv().await? {
             Some(Signal::Offer { sdp }) => sdp,
-            other => {
-                return Err(WebrtcError::InvalidSignaling(format!(
-                    "expected offer, got {other:?}"
-                )))
-            }
+            other => return Err(format!("expected offer, got {other:?}")),
         };
         peer.set_remote_description(SessionDescription {
             kind: SdpType::Offer,
             sdp: offer,
         })
-        .await?;
+        .await
+        .map_err(rtc)?;
 
-        let answer = peer.create_answer().await?;
+        let answer = peer.create_answer().await.map_err(rtc)?;
         let answer_sdp = answer.sdp.clone();
-        peer.set_local_description(answer).await?;
-        publish(relay, &Signal::Answer { sdp: answer_sdp }).await?;
-        publish_candidates(&peer, relay).await?;
-        publish(relay, &Signal::Done).await?;
+        peer.set_local_description(answer).await.map_err(rtc)?;
+        signaling
+            .publish(&Signal::Answer { sdp: answer_sdp })
+            .await?;
+        publish_candidates(&peer, signaling).await?;
+        signaling.publish(&Signal::Done).await?;
 
-        consume_signaling(&peer, relay).await?;
+        consume_signaling(&peer, signaling).await?;
 
-        peer.wait_connected().await?;
+        peer.wait_connected().await.map_err(rtc)?;
 
         let mut incoming = peer.incoming_data_channels();
         let (_status, batch) = incoming.read(Vec::with_capacity(1)).await;
-        let channel = batch
-            .into_iter()
-            .next()
-            .ok_or_else(|| WebrtcError::Other("no incoming data channel".into()))?;
-        Ok((peer, channel, hello_id))
+        let channel = batch.into_iter().next().ok_or("no incoming data channel")?;
+        Ok((peer, channel))
     }
 
-    /// The signaling schema, one JSON text frame per signal: the sibling
-    /// demo's offer/answer/candidate JSON plus the identity `hello` and a
-    /// `done` sentinel (the relay is a live pipe, so end-of-signaling is a
-    /// message, not a mailbox state).
+    /// The signaling schema, one JSON signal per datagram: the sibling
+    /// demo’s offer/answer/candidate JSON plus a `done` sentinel marking
+    /// the end of this side’s signals. Identities travel in no signal:
+    /// the relay authenticates each datagram’s source.
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "type", rename_all = "kebab-case")]
     enum Signal {
-        Hello {
-            endpoint_id: String,
-        },
         Offer {
             sdp: String,
         },
@@ -250,36 +283,11 @@ mod demo {
         Done,
     }
 
-    async fn publish(relay: &Websocket, signal: &Signal) -> Result<(), WebrtcError> {
-        let text = serde_json::to_string(signal)
-            .map_err(|e| WebrtcError::Other(format!("encode signal: {e}")))?;
-        relay.send(WsMessage::String(text)).await.map_err(ws_error)
-    }
-
-    /// Receive the peer's next signal; `none` once the peer sends `done`.
-    async fn recv_signal(relay: &Websocket) -> Result<Option<Signal>, WebrtcError> {
-        let message = relay.receive().await.map_err(ws_error)?;
-        let text = match message {
-            WsMessage::String(text) => text,
-            WsMessage::Binary(_) => {
-                return Err(WebrtcError::InvalidSignaling(
-                    "unexpected binary frame during signaling".into(),
-                ))
-            }
-        };
-        let signal = serde_json::from_str(&text)
-            .map_err(|e| WebrtcError::InvalidSignaling(format!("decode signal: {e}")))?;
-        match signal {
-            Signal::Done => Ok(None),
-            other => Ok(Some(other)),
-        }
-    }
-
     /// Drain local ICE candidates to the relay, then end-of-candidates.
     async fn publish_candidates(
         peer: &PeerConnection,
-        relay: &Websocket,
-    ) -> Result<(), WebrtcError> {
+        signaling: &Signaling<'_>,
+    ) -> Result<(), String> {
         let mut stream = peer.local_ice_candidates();
         let mut candidates = Vec::new();
         loop {
@@ -293,97 +301,64 @@ mod demo {
             }
         }
         for candidate in candidates {
-            publish(
-                relay,
-                &Signal::Candidate {
+            signaling
+                .publish(&Signal::Candidate {
                     candidate: candidate.candidate,
                     sdp_mid: candidate.sdp_mid,
                     sdp_mline_index: candidate.sdp_mline_index,
-                },
-            )
-            .await?;
+                })
+                .await?;
         }
-        publish(relay, &Signal::EndOfCandidates).await
+        signaling.publish(&Signal::EndOfCandidates).await
     }
 
-    /// Consume the peer's signals to its `done`, applying an answer and
-    /// each trickled candidate; returns the peer's hello identity if it
-    /// sent one.
+    /// Consume the peer’s signals to its `done`, applying an answer and
+    /// each trickled candidate.
     async fn consume_signaling(
         peer: &PeerConnection,
-        relay: &Websocket,
-    ) -> Result<Option<[u8; 32]>, WebrtcError> {
-        let mut hello_id = None;
-        while let Some(signal) = recv_signal(relay).await? {
+        signaling: &Signaling<'_>,
+    ) -> Result<(), String> {
+        while let Some(signal) = signaling.recv().await? {
             match signal {
-                Signal::Hello { endpoint_id } => {
-                    hello_id = Some(parse_endpoint_id(&endpoint_id)?);
-                }
-                Signal::Answer { sdp } => {
-                    peer.set_remote_description(SessionDescription {
+                Signal::Answer { sdp } => peer
+                    .set_remote_description(SessionDescription {
                         kind: SdpType::Answer,
                         sdp,
                     })
-                    .await?
-                }
+                    .await
+                    .map_err(rtc)?,
                 Signal::Offer { .. } => {
-                    return Err(WebrtcError::InvalidSignaling(
-                        "unexpected second offer".to_string(),
-                    ));
+                    return Err("unexpected second offer".into());
                 }
                 Signal::Candidate {
                     candidate,
                     sdp_mid,
                     sdp_mline_index,
-                } => {
-                    peer.add_ice_candidate(IceCandidate {
+                } => peer
+                    .add_ice_candidate(IceCandidate {
                         candidate,
                         sdp_mid,
                         sdp_mline_index,
                     })
-                    .await?
-                }
+                    .await
+                    .map_err(rtc)?,
                 Signal::EndOfCandidates => {}
-                Signal::Done => unreachable!("recv_signal maps done to none"),
+                Signal::Done => unreachable!("recv maps done to none"),
             }
         }
-        Ok(hello_id)
+        Ok(())
     }
 
-    /// Consume the peer's signals to its `done`, expecting only its hello
-    /// (the relay wire has no offer/answer dance).
-    async fn consume_hello(relay: &Websocket) -> Result<[u8; 32], WebrtcError> {
-        let mut hello_id = None;
-        while let Some(signal) = recv_signal(relay).await? {
-            match signal {
-                Signal::Hello { endpoint_id } => {
-                    hello_id = Some(parse_endpoint_id(&endpoint_id)?);
-                }
-                other => {
-                    return Err(WebrtcError::InvalidSignaling(format!(
-                        "unexpected signal on the relay wire: {other:?}"
-                    )))
-                }
-            }
-        }
-        hello_id.ok_or_else(|| WebrtcError::Other("peer sent no hello".into()))
-    }
-
-    fn parse_endpoint_id(text: &str) -> Result<[u8; 32], WebrtcError> {
-        let bytes = hex::decode(text)
-            .map_err(|e| WebrtcError::InvalidSignaling(format!("bad endpoint id: {e}")))?;
+    fn parse_endpoint_id(text: &str) -> Result<[u8; 32], String> {
+        let bytes = hex::decode(text).map_err(|e| format!("bad endpoint id: {e}"))?;
         bytes
             .as_slice()
             .try_into()
-            .map_err(|_| WebrtcError::InvalidSignaling("endpoint id is not 32 bytes".into()))
+            .map_err(|_| "endpoint id is not 32 bytes".to_string())
     }
 
-    fn ws_error(err: WebsocketError) -> WebrtcError {
-        WebrtcError::Other(format!("websocket: {err:?}"))
-    }
-
-    fn signaling_error(err: impl std::fmt::Debug) -> String {
-        format!("signaling: {err:?}")
+    fn rtc(err: crate::bindings::lann::webrtc_datachannels::types::Error) -> String {
+        format!("webrtc: {err:?}")
     }
 
     crate::bindings::export!(Component with_types_in crate::bindings);

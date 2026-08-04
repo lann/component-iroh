@@ -27,6 +27,9 @@ aes-gcm = "0.10"
 getrandom = "0.4"
 bytes = "1"
 hex = "0.4"
+# The relay handshake's challenge is signed via a blake3-derived key
+# (iroh-relay's domain separation).
+blake3 = { version = "1", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wit-bindgen = { version = "0.59", features = ["async"] }

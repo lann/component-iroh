@@ -55,6 +55,16 @@ impl Identity {
             ocsp: None,
         }
     }
+
+    /// Sign `message` with the identity key (the relay handshake path;
+    /// TLS signing goes through the rustls `Signer` instead).
+    pub async fn sign(&self, message: &[u8]) -> Result<Vec<u8>, String> {
+        self.key
+            .key
+            .sign(message)
+            .await
+            .map_err(|e| format!("webcrypto ed25519 sign: {e:?}"))
+    }
 }
 
 struct WebcryptoEd25519 {

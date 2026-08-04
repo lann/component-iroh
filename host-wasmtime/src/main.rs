@@ -14,13 +14,13 @@
 //!   * the `lann:webcrypto` surface via [`lann_webcrypto_wasmtime`]
 //!     (RustCrypto).
 //!
-//! Run two instances — a client and a server — pointed at the same room
-//! on the same relay server:
+//! Run two instances — a server, then a client handed the server's
+//! printed endpoint ID — against the same stock `iroh-relay` server:
 //!
 //! ```sh
-//! iroh-spike-relayd --addr 127.0.0.1:8090 &
-//! iroh-spike-host <component.wasm> --role server --server ws://127.0.0.1:8090 --room demo &
-//! iroh-spike-host <component.wasm> --role client --server ws://127.0.0.1:8090 --room demo
+//! iroh-relay --dev &   # serves ws on 127.0.0.1:3340
+//! iroh-spike-host <component.wasm> --role server --server http://127.0.0.1:3340 &
+//! iroh-spike-host <component.wasm> --role client --server http://127.0.0.1:3340 --peer <endpoint-id>
 //! ```
 
 use lann_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
@@ -122,7 +122,7 @@ struct Cli {
     component: String,
     role: DemoRole,
     server: String,
-    room: String,
+    peer: Option<String>,
     transport: DemoTransport,
     message: String,
 }
@@ -130,7 +130,8 @@ struct Cli {
 fn usage() -> wasmtime::Error {
     wasmtime::Error::msg(
         "usage: iroh-spike-host <component.wasm> --role <client|server> \
-         --server <relay-ws-url> --room <room> [--transport <webrtc|relay>] [--message M]",
+         --server <relay-url> [--peer <endpoint-id-hex>] \
+         [--transport <webrtc|relay>] [--message M]",
     )
 }
 
@@ -139,7 +140,7 @@ fn parse_args() -> Result<Cli> {
     let component = args.next().ok_or_else(usage)?;
     let mut role = None;
     let mut server = None;
-    let mut room = None;
+    let mut peer = None;
     let mut transport = DemoTransport::Webrtc;
     let mut message = "hello over QUIC over a data channel".to_string();
     while let Some(flag) = args.next() {
@@ -153,7 +154,7 @@ fn parse_args() -> Result<Cli> {
                 })
             }
             "--server" => server = Some(value()?),
-            "--room" => room = Some(value()?),
+            "--peer" => peer = Some(value()?),
             "--transport" => {
                 transport = match value()?.as_str() {
                     "webrtc" => DemoTransport::Webrtc,
@@ -169,7 +170,7 @@ fn parse_args() -> Result<Cli> {
         component,
         role: role.ok_or_else(usage)?,
         server: server.ok_or_else(usage)?,
-        room: room.ok_or_else(usage)?,
+        peer,
         transport,
         message,
     })
@@ -207,9 +208,9 @@ async fn main() -> Result<()> {
     let role = cli.role;
     let config = RunConfig {
         server: cli.server,
-        room: cli.room,
         role,
         transport: cli.transport,
+        peer: cli.peer,
         message: cli.message,
     };
     let report = store

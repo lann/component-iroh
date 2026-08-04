@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["guest", "host-wasmtime", "relayd"]
+members = ["guest", "host-wasmtime"]
 # The sibling checkouts under .deps are their own workspaces; without the
 # exclusion cargo binds their workspace-inheriting members to this root.
 exclude = [".deps"]

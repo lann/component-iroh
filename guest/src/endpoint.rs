@@ -25,27 +25,33 @@ use quinn_proto::{
 
 use crate::bindings::lann::webrtc_datachannels::connections::DataChannel;
 use crate::bindings::lann::webrtc_datachannels::types::Message as ChannelMessage;
-use crate::bindings::lann::websocket::connections::Websocket;
-use crate::bindings::lann::websocket::types::Message as WsMessage;
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::crypto::sign::Identity;
 use crate::quic_glue::{
     HkdfHandshakeTokenKey, HmacSha256ResetKey, QuicClientConfig, QuicServerConfig,
 };
+use crate::relay::RelayConn;
 use crate::tls;
 
-/// The datagram wire QUIC runs over: one binary message per QUIC datagram
-/// on either carrier. Text frames are not datagrams and are dropped.
+/// The datagram wire QUIC runs over: one datagram per binary message on
+/// either carrier.
 pub enum Wire<'a> {
     /// An unreliable, unordered WebRTC data channel.
     Channel(&'a DataChannel),
-    /// The relay connection: reliable and ordered, which QUIC tolerates
-    /// (it assumes neither).
-    Relay(&'a Websocket),
+    /// The relay connection: datagrams addressed by endpoint ID, relayed
+    /// reliably and in order, which QUIC tolerates (it assumes neither).
+    Relay {
+        conn: &'a RelayConn,
+        /// The peer this wire speaks to. A client sets it up front; a
+        /// server learns it from the first datagram's relay-authenticated
+        /// source and the wire is bound to that peer from then on.
+        peer: std::cell::Cell<Option<[u8; 32]>>,
+    },
 }
 
 impl Wire<'_> {
-    /// The next inbound datagram; `Ok(None)` for a non-binary frame.
+    /// The next inbound datagram; `Ok(None)` for a frame that is not one
+    /// (a text message, or a relay datagram from some other peer).
     async fn receive(&self) -> Result<Option<Vec<u8>>, String> {
         match self {
             Wire::Channel(channel) => match channel.receive().await {
@@ -53,11 +59,17 @@ impl Wire<'_> {
                 Ok(ChannelMessage::String(_)) => Ok(None),
                 Err(err) => Err(format!("data channel: {err:?}")),
             },
-            Wire::Relay(relay) => match relay.receive().await {
-                Ok(WsMessage::Binary(datagram)) => Ok(Some(datagram)),
-                Ok(WsMessage::String(_)) => Ok(None),
-                Err(err) => Err(format!("relay: {err:?}")),
-            },
+            Wire::Relay { conn, peer } => {
+                let datagram = conn.recv_datagram().await?;
+                match peer.get() {
+                    None => {
+                        peer.set(Some(datagram.source));
+                        Ok(Some(datagram.payload))
+                    }
+                    Some(expected) if expected == datagram.source => Ok(Some(datagram.payload)),
+                    Some(_) => Ok(None),
+                }
+            }
         }
     }
 
@@ -67,10 +79,10 @@ impl Wire<'_> {
                 .send(ChannelMessage::Binary(payload.to_vec()))
                 .await
                 .map_err(|err| format!("data channel: {err:?}")),
-            Wire::Relay(relay) => relay
-                .send(WsMessage::Binary(payload.to_vec()))
-                .await
-                .map_err(|err| format!("relay: {err:?}")),
+            Wire::Relay { conn, peer } => {
+                let peer = peer.get().ok_or("relay wire has no peer yet")?;
+                conn.send_datagram(&peer, payload).await
+            }
         }
     }
 
@@ -79,9 +91,15 @@ impl Wire<'_> {
     fn close(&self) {
         match self {
             Wire::Channel(channel) => channel.close(),
-            Wire::Relay(relay) => {
-                let _ = relay.close(None, "");
-            }
+            Wire::Relay { conn, .. } => conn.close(),
+        }
+    }
+
+    /// The peer this wire ended up bound to.
+    pub fn peer(&self) -> Option<[u8; 32]> {
+        match self {
+            Wire::Channel(_) => None,
+            Wire::Relay { peer, .. } => peer.get(),
         }
     }
 }
@@ -139,9 +157,13 @@ fn endpoint_config() -> Result<Arc<EndpointConfig>, String> {
 }
 
 /// Run one endpoint over `wire` until the demo completes.
+///
+/// `peer_endpoint_id` pins the TLS connection on the client; a server
+/// authenticates whoever connects (the caller cross-checks the resulting
+/// identity).
 pub async fn run(
     identity: &Identity,
-    peer_endpoint_id: [u8; 32],
+    peer_endpoint_id: Option<[u8; 32]>,
     wire: &Wire<'_>,
     role: Role,
 ) -> Result<Outcome, String> {
@@ -150,8 +172,9 @@ pub async fn run(
 
     match &role {
         Role::Client { .. } => {
+            let peer = peer_endpoint_id.ok_or("client role requires the peer's endpoint id")?;
             endpoint = Endpoint::new(endpoint_config()?, None, true, None);
-            let tls = tls::client_config(identity, peer_endpoint_id)
+            let tls = tls::client_config(identity, peer)
                 .map_err(|e| format!("client tls config: {e}"))?;
             let mut config = ClientConfig::new(Arc::new(QuicClientConfig::new(Arc::new(tls))));
             config.transport_config(transport_config());

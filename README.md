@@ -141,8 +141,9 @@ scale.
 The `spike/quic-over-datachannel` work carries the first code: a
 happy-path QUIC connection between two component instances, resolving the
 crypto-integration question (issue #5, Path A), recording a first
-transport profile (issue #1), and exercising both wires the design names
-— a WebRTC data channel and the relay connection itself.
+transport profile (issue #1), and speaking iroh's relay wire protocol to
+an unmodified upstream relay (issue #2) — exercising both wires the
+design names, a WebRTC data channel and the relay connection itself.
 
 - **One guest component** (`guest/`, `wasm32-wasip2`): `quinn-proto`
   with default features off, driven by a custom rustls `CryptoProvider`
@@ -157,38 +158,50 @@ transport profile (issue #1), and exercising both wires the design names
   the Ed25519 key in the SPKI is the endpoint ID. Signaling only
   *claims* an identity; the handshake authenticates it, and the two
   must agree.
-- **Signaling rides a relay connection** (`lann:websocket`): each peer
-  opens a WebSocket to `relayd/` — a room-pairing frame forwarder — and
-  exchanges identities, SDP, and trickled ICE over it. There is no
-  side-channel signaling import; the relay leg is the one the designed
-  endpoint holds anyway.
+- **A stock iroh relay serves the relay leg.** Each peer opens a
+  `lann:websocket` connection to an unmodified upstream
+  [`iroh-relay`](https://github.com/n0-computer/iroh/tree/main/iroh-relay)
+  server and speaks iroh's relay wire protocol: the websocket subprotocol
+  negotiation, the challenge-response authentication handshake (the
+  browser-compatible path; the challenge signature comes from the
+  webcrypto identity handle), and datagram frames addressed by endpoint
+  ID. Frame encodings are pinned by known-answer tests mirroring
+  upstream's own snapshot vectors.
+- **Pairing is by endpoint ID**, iroh's model: the guest prints its ID at
+  startup, the client is handed the server's (`--peer`), and a server
+  learns the client's from the relay-authenticated source of the first
+  inbound frame. The handshake-authenticated TLS key must agree with the
+  relay-authenticated source — there is no separate identity exchange.
 - **Two wires, one endpoint** (`--transport webrtc|relay`): QUIC runs
   end-to-end either over an unreliable, unordered data channel
-  (`ordered=false`, `max-retransmits=0`) or over the relay connection
-  itself, with the relay never holding connection keys. One QUIC
-  datagram rides in one binary message on either carrier; fixed
-  1200-byte initial MTU with MTU discovery and GSO batching disabled.
+  (`ordered=false`, `max-retransmits=0`, SDP/ICE signaling carried as
+  relay datagrams) or over the relay itself as raw QUIC packets in relay
+  datagram frames, with the relay never holding connection keys. One QUIC
+  datagram rides in one frame on either carrier; fixed 1200-byte initial
+  MTU with MTU discovery and GSO batching disabled.
 - **Two hosts, four pairings per wire**: a Wasmtime host
   (`host-wasmtime/`, the sibling host crates) and a Node 24+ jco host
   (`host-jco/`, the siblings' JS host modules, JSPI). Every
   client/server pairing of the two hosts exchanges one authenticated
-  echo each way on both wires.
+  echo each way on both wires, through the stock relay.
 
-To run it: build the guest, hosts, and relay, then point a server and a
-client at the same room (`WEBRTC_INCLUDE_LOOPBACK=1` lets same-host
-peers pair on the WebRTC wire):
+To run it: build the guest, hosts, and the upstream relay, then hand the
+server's printed endpoint ID to the client (`WEBRTC_INCLUDE_LOOPBACK=1`
+lets same-host peers pair on the WebRTC wire):
 
 ```sh
-./scripts/setup.sh   # sibling checkouts under .deps + npm installs
+./scripts/setup.sh   # sibling + iroh checkouts under .deps, npm installs
 cargo build -p iroh-spike-guest --target wasm32-wasip2 --release
-cargo build -p iroh-spike-host-wasmtime -p iroh-spike-relayd --release
-target/release/iroh-spike-relayd --addr 127.0.0.1:8090 &
+cargo build -p iroh-spike-host-wasmtime --release
+(cd .deps/iroh && cargo build --release -p iroh-relay --features server --bin iroh-relay)
+.deps/iroh/target/release/iroh-relay --dev &   # ws on 127.0.0.1:3340
 WEBRTC_INCLUDE_LOOPBACK=1 target/release/iroh-spike-host \
   target/wasm32-wasip2/release/iroh_spike_guest.wasm \
-  --role server --server ws://127.0.0.1:8090 --room demo &
+  --role server --server http://127.0.0.1:3340 &
+# scrape the server's `endpoint-id <hex>` line, then:
 WEBRTC_INCLUDE_LOOPBACK=1 target/release/iroh-spike-host \
   target/wasm32-wasip2/release/iroh_spike_guest.wasm \
-  --role client --server ws://127.0.0.1:8090 --room demo
+  --role client --server http://127.0.0.1:3340 --peer <endpoint-id>
 ```
 
 Add `--transport relay` to both sides to run QUIC through the relay

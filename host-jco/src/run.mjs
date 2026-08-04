@@ -5,11 +5,12 @@
 // `webrtc.js` (node-datachannel) as the wire and the webcrypto sibling's
 // `webcrypto.js` (Web Crypto API) behind the handshake.
 //
-// Run two of these — a client and a server — against the same room:
+// Run two of these — a server, then a client handed the server's printed
+// endpoint ID — against the same stock iroh-relay server:
 //
-//   iroh-spike-relayd --addr 127.0.0.1:8090 &
-//   npm run start -- --role server --server ws://127.0.0.1:8090 --room demo &
-//   npm run start -- --role client --server ws://127.0.0.1:8090 --room demo
+//   iroh-relay --dev &   # serves ws on 127.0.0.1:3340
+//   npm run start -- --role server --server http://127.0.0.1:3340 &
+//   npm run start -- --role client --server http://127.0.0.1:3340 --peer <endpoint-id>
 import { parseArgs } from "node:util";
 
 import { demo } from "../generated/iroh-spike.js";
@@ -18,7 +19,7 @@ const { values } = parseArgs({
   options: {
     role: { type: "string" },
     server: { type: "string" },
-    room: { type: "string" },
+    peer: { type: "string" },
     transport: { type: "string", default: "webrtc" },
     message: { type: "string", default: "hello over QUIC over a data channel" },
   },
@@ -49,20 +50,19 @@ async function unwrapResult(call) {
 }
 
 async function main() {
-  const { role, server, room, transport, message } = values;
+  const { role, server, peer, transport, message } = values;
   if (
     !role ||
     !server ||
-    !room ||
     !["client", "server"].includes(role) ||
     !["webrtc", "relay"].includes(transport)
   ) {
     throw new Error(
-      "usage: run.mjs --role <client|server> --server <url> --room <id> [--transport <webrtc|relay>] [--message M]",
+      "usage: run.mjs --role <client|server> --server <url> [--peer <endpoint-id-hex>] [--transport <webrtc|relay>] [--message M]",
     );
   }
 
-  const report = await unwrapResult(() => demo.run({ server, room, role, transport, message }));
+  const report = await unwrapResult(() => demo.run({ server, role, transport, peer, message }));
 
   console.log(
     `iroh-spike (${role}): endpoint=${report.endpointId} peer=${report.peerId} ` +
