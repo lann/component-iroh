@@ -1648,6 +1648,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
+name = "iroh-endpoint"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "iroh-endpoint-core",
+ "lann-webcrypto-guest",
+ "quinn-proto",
+ "rustls",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "iroh-endpoint-core"
+version = "0.0.1"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "blake3",
+ "bytes",
+ "getrandom 0.4.3",
+ "hex",
+ "hkdf",
+ "hmac",
+ "lann-webcrypto-guest",
+ "quinn-proto",
+ "rustls",
+ "rustls-pki-types",
+ "sha2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "iroh-endpoint-demo"
+version = "0.0.1"
+dependencies = [
+ "hex",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "iroh-exec-model-guest"
 version = "0.0.1"
 dependencies = [
@@ -1661,22 +1705,16 @@ dependencies = [
 name = "iroh-spike-guest"
 version = "0.0.1"
 dependencies = [
- "aes",
- "aes-gcm",
  "blake3",
  "bytes",
  "futures",
  "getrandom 0.4.3",
  "hex",
- "hkdf",
- "hmac",
- "lann-webcrypto-guest",
+ "iroh-endpoint-core",
  "quinn-proto",
  "rustls",
- "rustls-pki-types",
  "serde",
  "serde_json",
- "sha2",
  "wit-bindgen 0.59.0",
 ]
 

@@ -1,12 +1,12 @@
 [package]
-name = "iroh-spike-guest"
-version = "0.0.1"
+name = "iroh-endpoint"
+version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "Spike guest: one iroh-style QUIC endpoint over a WebRTC data channel"
+description = "The lann:iroh endpoint component: connect/accept by endpoint ID over the relay wire"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 iroh-endpoint-core = { path = "../core" }
@@ -16,9 +16,6 @@ getrandom = "0.4"
 bytes = "1"
 hex = "0.4"
 blake3 = { version = "1", default-features = false }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = { version = "0.59", features = ["async"] }
+wit-bindgen = { version = "0.59", features = ["async", "async-spawn"] }
 futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+lann-webcrypto-guest = { path = "../.deps/webcrypto/rust/guest" }

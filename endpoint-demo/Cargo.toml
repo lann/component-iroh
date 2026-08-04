@@ -1,0 +1,13 @@
+[package]
+name = "iroh-endpoint-demo"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "Endpoint demo consumer: one echo exchange driven through the lann:iroh surface"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.59", features = ["async"] }
+hex = "0.4"

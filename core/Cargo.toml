@@ -1,0 +1,35 @@
+[package]
+name = "iroh-endpoint-core"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "Shared endpoint core: the crypto split's provider, quinn glue, RPK TLS, and relay wire framing"
+
+[dependencies]
+# Sans-I/O QUIC. Default features off: the bundled rustls glue (and its
+# ring dependency) is replaced by this crate's `quic_glue`, which delegates
+# to the webcrypto-backed provider instead.
+quinn-proto = { version = "=0.11.16", default-features = false }
+rustls = { version = "=0.23.43", default-features = false, features = ["std", "custom-provider"] }
+rustls-pki-types = "1"
+
+# In-guest record protection and key schedule (the crypto split's in-guest
+# half): pure-Rust RustCrypto implementations.
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+aes = "0.8"
+aes-gcm = "0.10"
+
+getrandom = "0.4"
+bytes = "1"
+hex = "0.4"
+# The relay handshake's challenge is signed via a blake3-derived key
+# (iroh-relay's domain separation).
+blake3 = { version = "1", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { version = "0.59", features = ["async"] }
+lann-webcrypto-guest = { path = "../.deps/webcrypto/rust/guest" }
+
+[dev-dependencies]

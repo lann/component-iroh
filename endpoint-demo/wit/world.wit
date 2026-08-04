@@ -1,0 +1,47 @@
+package lann:iroh-demo@0.0.1;
+
+/// The endpoint demo: one echo exchange between two processes, driven
+/// entirely through the `lann:iroh` endpoint surface. Demo plumbing, not
+/// a designed interface.
+interface demo {
+    /// Which side this process drives.
+    enum role { client, server }
+
+    /// One run's inputs.
+    record run-config {
+        /// The iroh relay server's base URL, e.g. `http://127.0.0.1:3340`.
+        relay-url: string,
+        /// This process's role.
+        role: role,
+        /// The server peer's endpoint ID (hex). Required on the client.
+        peer: option<string>,
+        /// The application message the client sends (the server echoes it).
+        message: string,
+    }
+
+    /// One run's outcome.
+    record run-report {
+        /// This endpoint's identity, hex-encoded.
+        endpoint-id: string,
+        /// The authenticated peer's identity, hex-encoded.
+        peer-id: string,
+        /// Milliseconds from starting `connect` to it resolving. Zero on
+        /// the server.
+        handshake-ms: u64,
+        /// Milliseconds from sending the message to reading the echo.
+        /// Zero on the server.
+        roundtrip-ms: u64,
+        /// The application payload this side received.
+        received: string,
+    }
+
+    /// Drive one full run. The process's own endpoint ID is written to
+    /// stdout as `endpoint-id <hex>` after binding, so a driver can hand
+    /// it to the peer.
+    run: async func(config: run-config) -> result<run-report, string>;
+}
+
+world iroh-demo {
+    import lann:iroh/endpoint@0.1.0;
+    export demo;
+}

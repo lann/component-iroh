@@ -24,9 +24,6 @@ use crate::crypto::{provider, verify_algorithms};
 /// SPKI pin, not the name.
 pub const SERVER_NAME: &str = "endpoint.iroh.invalid";
 
-/// The demo's ALPN protocol.
-pub const ALPN: &[u8] = b"iroh-spike/0";
-
 /// DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410, algorithm
 /// 1.3.101.112): the 32-byte key follows it.
 const ED25519_SPKI_PREFIX: [u8; 12] = [
@@ -43,11 +40,12 @@ pub fn endpoint_id_from_spki(spki: &[u8]) -> Option<[u8; 32]> {
     key.try_into().ok()
 }
 
-/// A TLS 1.3 client config authenticating as `identity` and requiring the
-/// server to present exactly `expected_server`'s key.
+/// A TLS 1.3 client config authenticating as `identity`, offering `alpns`,
+/// and requiring the server to present exactly `expected_server`'s key.
 pub fn client_config(
     identity: &Identity,
     expected_server: [u8; 32],
+    alpns: Vec<Vec<u8>>,
 ) -> Result<rustls::ClientConfig, Error> {
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])?
@@ -59,13 +57,16 @@ pub fn client_config(
         .with_client_cert_resolver(Arc::new(AlwaysResolvesClientRawPublicKeys::new(Arc::new(
             identity.certified_key(),
         ))));
-    config.alpn_protocols = vec![ALPN.to_vec()];
+    config.alpn_protocols = alpns;
     Ok(config)
 }
 
-/// A TLS 1.3 server config authenticating as `identity` and requiring
-/// clients to present (and prove) an Ed25519 raw public key.
-pub fn server_config(identity: &Identity) -> Result<rustls::ServerConfig, Error> {
+/// A TLS 1.3 server config authenticating as `identity`, serving `alpns`,
+/// and requiring clients to present (and prove) an Ed25519 raw public key.
+pub fn server_config(
+    identity: &Identity,
+    alpns: Vec<Vec<u8>>,
+) -> Result<rustls::ServerConfig, Error> {
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(ClientIdentityVerifier {
@@ -74,7 +75,7 @@ pub fn server_config(identity: &Identity) -> Result<rustls::ServerConfig, Error>
         .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(Arc::new(
             identity.certified_key(),
         ))));
-    config.alpn_protocols = vec![ALPN.to_vec()];
+    config.alpn_protocols = alpns;
     Ok(config)
 }
 

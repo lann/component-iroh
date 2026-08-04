@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# The repeatable cross-host gate: every demo pairing this repository
+# claims works, asserted in one run. Requires the components and hosts
+# already built (`just build`) and the iroh-relay binary present
+# (`just relay-build`). Prints one PASS/FAIL line per pairing and exits
+# nonzero if any failed.
+set -u
+cd "$(dirname "$0")/.."
+
+RELAY_PORT=3341
+RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
+SPIKE_WASM=target/wasm32-wasip2/release/iroh_spike_guest.wasm
+COMPOSED_WASM=target/components/iroh-demo.wasm
+HOST=target/release/iroh-spike-host
+EHOST=target/release/endpoint-demo
+LOGDIR=$(mktemp -d)
+FAILURES=0
+
+# --- infrastructure -------------------------------------------------------
+
+cat > "$LOGDIR/relay.toml" <<EOF
+http_bind_addr = "127.0.0.1:${RELAY_PORT}"
+EOF
+.deps/iroh/target/release/iroh-relay --dev -c "$LOGDIR/relay.toml" \
+    > "$LOGDIR/relay.log" 2>&1 &
+RELAY_PID=$!
+trap 'kill $RELAY_PID 2>/dev/null' EXIT
+sleep 1
+
+# Start a server peer, scrape its endpoint id, run the client peer, and
+# assert both reported OK.
+#   run_pair <name> <server-cmd...> -- <client-cmd...>
+# The client command receives the server's endpoint id appended after
+# its own --peer flag.
+run_pair() {
+    local name=$1; shift
+    local server=()
+    while [ "$1" != "--" ]; do server+=("$1"); shift; done
+    shift
+    local client=("$@")
+
+    "${server[@]}" > "$LOGDIR/$name-server.log" 2>&1 &
+    local server_pid=$!
+    local server_id=""
+    for _ in $(seq 1 60); do
+        server_id=$(grep -m1 "^endpoint-id" "$LOGDIR/$name-server.log" 2>/dev/null | awk '{print $2}')
+        [ -n "$server_id" ] && break
+        sleep 0.5
+    done
+    if [ -z "$server_id" ]; then
+        echo "FAIL $name (server printed no endpoint id)"
+        kill "$server_pid" 2>/dev/null
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+
+    "${client[@]}" "$server_id" > "$LOGDIR/$name-client.log" 2>&1
+    local client_status=$?
+    wait "$server_pid" 2>/dev/null
+    local server_status=$?
+    if [ "$client_status" = 0 ] && [ "$server_status" = 0 ] \
+        && grep -q "^OK:" "$LOGDIR/$name-client.log" \
+        && grep -q "^OK:" "$LOGDIR/$name-server.log"; then
+        echo "PASS $name"
+    else
+        echo "FAIL $name (client=$client_status server=$server_status; logs in $LOGDIR)"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+jco() {
+    # Subshell cd: npm-resolved modules live in host-jco.
+    (cd host-jco && exec timeout 120 node --experimental-wasm-jspi "$@")
+}
+
+# --- spike demo: both wires, all four host pairings -----------------------
+
+for wire in webrtc relay; do
+    run_pair "spike-$wire-wasmtime-wasmtime" \
+        env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$HOST" "$SPIKE_WASM" \
+            --role server --server "$RELAY_URL" --transport "$wire" -- \
+        env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$HOST" "$SPIKE_WASM" \
+            --role client --server "$RELAY_URL" --transport "$wire" \
+            --message "matrix $wire" --peer
+    run_pair "spike-$wire-jco-jco" \
+        jco src/run.mjs --role server --server "$RELAY_URL" --transport "$wire" -- \
+        jco src/run.mjs --role client --server "$RELAY_URL" --transport "$wire" \
+            --message "matrix $wire" --peer
+    run_pair "spike-$wire-wasmtime-server-jco-client" \
+        env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$HOST" "$SPIKE_WASM" \
+            --role server --server "$RELAY_URL" --transport "$wire" -- \
+        jco src/run.mjs --role client --server "$RELAY_URL" --transport "$wire" \
+            --message "matrix $wire" --peer
+    run_pair "spike-$wire-jco-server-wasmtime-client" \
+        jco src/run.mjs --role server --server "$RELAY_URL" --transport "$wire" -- \
+        env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$HOST" "$SPIKE_WASM" \
+            --role client --server "$RELAY_URL" --transport "$wire" \
+            --message "matrix $wire" --peer
+done
+
+# --- endpoint surface: the wac-composed demo under wasmtime ---------------
+#
+# The jco leg of the endpoint surface is blocked by upstream jco: its
+# scheduler stops delivering waitable events once a detached task holds
+# in-flight imports across export calls (tracked in this repository's
+# issues; the JS driver host-jco/src/run-endpoint.mjs is ready for when
+# it works).
+
+run_pair "endpoint-relay-wasmtime-wasmtime" \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" -- \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
+        --message "matrix endpoint" --peer
+
+# --------------------------------------------------------------------------
+
+if [ "$FAILURES" != 0 ]; then
+    echo "matrix: $FAILURES pairing(s) failed (logs in $LOGDIR)"
+    exit 1
+fi
+echo "matrix: all pairings passed"
+rm -rf "$LOGDIR"

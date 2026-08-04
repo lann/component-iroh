@@ -7,10 +7,6 @@
 //! path runs in-guest. See the repository README for the design this
 //! slices through.
 
-pub mod crypto;
-pub mod quic_glue;
-pub mod relay_frames;
-
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod bindings {
     wit_bindgen::generate!({
@@ -34,8 +30,6 @@ pub(crate) mod bindings {
 mod endpoint;
 #[cfg(target_arch = "wasm32")]
 mod relay;
-#[cfg(target_arch = "wasm32")]
-pub mod tls;
 
 #[cfg(target_arch = "wasm32")]
 mod demo {
@@ -53,9 +47,9 @@ mod demo {
     use crate::bindings::lann::webrtc_datachannels::types::{
         IceCandidate, SdpType, SessionDescription,
     };
-    use crate::crypto::sign::Identity;
     use crate::endpoint;
     use crate::relay::RelayConn;
+    use iroh_endpoint_core::crypto::sign::Identity;
 
     pub struct Component;
 

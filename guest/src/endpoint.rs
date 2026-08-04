@@ -26,12 +26,12 @@ use quinn_proto::{
 use crate::bindings::lann::webrtc_datachannels::connections::DataChannel;
 use crate::bindings::lann::webrtc_datachannels::types::Message as ChannelMessage;
 use crate::bindings::wasi::clocks::monotonic_clock;
-use crate::crypto::sign::Identity;
-use crate::quic_glue::{
+use crate::relay::RelayConn;
+use iroh_endpoint_core::crypto::sign::Identity;
+use iroh_endpoint_core::quic_glue::{
     HkdfHandshakeTokenKey, HmacSha256ResetKey, QuicClientConfig, QuicServerConfig,
 };
-use crate::relay::RelayConn;
-use crate::tls;
+use iroh_endpoint_core::tls;
 
 /// The datagram wire QUIC runs over: one datagram per binary message on
 /// either carrier.
@@ -111,6 +111,9 @@ const CLIENT_ADDR: SocketAddr =
 const SERVER_ADDR: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 4433);
 
+/// The spike demo's ALPN protocol.
+const SPIKE_ALPN: &[u8] = b"iroh-spike/0";
+
 /// Timer tick servicing quinn's deadlines (loss detection, idle, pacing).
 const TICK_NS: u64 = 50_000_000;
 
@@ -174,7 +177,7 @@ pub async fn run(
         Role::Client { .. } => {
             let peer = peer_endpoint_id.ok_or("client role requires the peer's endpoint id")?;
             endpoint = Endpoint::new(endpoint_config()?, None, true, None);
-            let tls = tls::client_config(identity, peer)
+            let tls = tls::client_config(identity, peer, vec![SPIKE_ALPN.to_vec()])
                 .map_err(|e| format!("client tls config: {e}"))?;
             let mut config = ClientConfig::new(Arc::new(QuicClientConfig::new(Arc::new(tls))));
             config.transport_config(transport_config());
@@ -184,8 +187,8 @@ pub async fn run(
             connection = Some(pair);
         }
         Role::Server => {
-            let tls =
-                tls::server_config(identity).map_err(|e| format!("server tls config: {e}"))?;
+            let tls = tls::server_config(identity, vec![SPIKE_ALPN.to_vec()])
+                .map_err(|e| format!("server tls config: {e}"))?;
             let mut token_master = [0u8; 32];
             getrandom::fill(&mut token_master).map_err(|e| format!("getrandom: {e}"))?;
             let mut config = ServerConfig::new(

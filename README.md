@@ -209,6 +209,25 @@ instead of a data channel. For the Node host: `cd host-jco &&
 npm install && npm run transpile`, then `npm run start -- --role
 <client|server> --server ... --room ...`.
 
+### The endpoint component
+
+The designed surface (`wit/iroh.wit`, issue #3) has a first
+implementation: `endpoint/` exports `lann:iroh/endpoint@0.1.0` —
+`bind`/`connect`/`accept` by endpoint ID, multiple connections, QUIC
+streams as resources — over the relay wire, with `endpoint-demo/` as its
+first consumer, composed via `wac plug` and driven by
+`host-wasmtime/src/bin/endpoint-demo.rs`. Internally: one detached pump
+task per bound endpoint owns all I/O, and resource methods observe its
+consequences by bounded polling on the clock import (cross-task wakeups
+have no channel that works on every host today; see the issues). The
+jco leg of this surface is blocked on an upstream jco scheduler defect;
+the JS consumer driver (`host-jco/src/run-endpoint.mjs`) is ready for
+when it lands.
+
+`just matrix` runs every claimed pairing — both spike wires across all
+four host pairings plus the composed endpoint demo — against a stock
+`iroh-relay`; `just ci` is the full gate.
+
 ## Open questions
 
 Tracked as issues; the headline ones:
