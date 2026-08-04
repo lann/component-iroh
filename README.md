@@ -136,6 +136,57 @@ scale.
   sockets.
 - **Non-extractable node identity** on platforms with key storage.
 
+## The spike: one QUIC connection over a data channel
+
+The `spike/quic-over-datachannel` work carries the first code: a
+happy-path QUIC connection between two component instances over a real
+WebRTC data channel, resolving the crypto-integration question (issue
+#5, Path A) and recording a first transport profile (issue #1).
+
+- **One guest component** (`guest/`, `wasm32-wasip2`): `quinn-proto`
+  with default features off, driven by a custom rustls `CryptoProvider`
+  implementing the crypto split — X25519 key exchange and Ed25519
+  identity sign/verify through `lann:webcrypto` (the identity key is a
+  non-extractable handle), while SHA-256, the HKDF key schedule, and
+  AES-128-GCM record/packet protection run in-guest (RFC 9001 known
+  answers under `cargo test`). rustls's synchronous callbacks bridge to
+  the async imports with `wit_bindgen::block_on`, which is legal because
+  the demo's only export (`demo.run`) is async-lifted.
+- **Iroh-style identity**: TLS authenticates raw public keys (RFC 7250);
+  the Ed25519 key in the SPKI is the endpoint ID. The signaling mailbox
+  only *claims* an identity; the handshake authenticates it, and the two
+  must agree.
+- **Transport profile**: the channel is unreliable and unordered
+  (`ordered=false`, `max-retransmits=0`); one QUIC datagram rides in one
+  binary channel message; fixed 1200-byte initial MTU with MTU discovery
+  and GSO batching disabled (the channel fragments transparently, so
+  probing would measure nothing real).
+- **Two hosts, four pairings**: a Wasmtime host (`host-wasmtime/`, the
+  sibling host crates plus a native rendezvous client) and a Node 24+
+  jco host (`host-jco/`, the siblings' JS host modules, JSPI). Every
+  client/server pairing of the two hosts exchanges one authenticated
+  echo each way.
+
+To run it: build the guest and hosts, start the webrtc sibling's
+signaling server, and point a server and a client at the same room
+(`WEBRTC_INCLUDE_LOOPBACK=1` lets same-host peers pair):
+
+```sh
+./scripts/setup.sh   # git worktrees under .deps + npm installs
+cargo build -p iroh-spike-guest --target wasm32-wasip2 --release
+cargo build -p iroh-spike-host-wasmtime --release
+cargo run --manifest-path .deps/webrtc/Cargo.toml -p conformance-signalingd -- --host 127.0.0.1 --port 8080 &
+WEBRTC_INCLUDE_LOOPBACK=1 target/release/iroh-spike-host \
+  target/wasm32-wasip2/release/iroh_spike_guest.wasm \
+  --role server --server http://127.0.0.1:8080 --room demo &
+WEBRTC_INCLUDE_LOOPBACK=1 target/release/iroh-spike-host \
+  target/wasm32-wasip2/release/iroh_spike_guest.wasm \
+  --role client --server http://127.0.0.1:8080 --room demo
+```
+
+For the Node host: `cd host-jco && npm install && npm run transpile`,
+then `npm run start -- --role <client|server> --server ... --room ...`.
+
 ## Open questions
 
 Tracked as issues; the headline ones:
