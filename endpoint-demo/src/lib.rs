@@ -59,6 +59,11 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
         .ok_or("the client role requires the server's endpoint id (peer)")?;
     let peer = hex::decode(peer_hex).map_err(|e| format!("bad endpoint id: {e}"))?;
 
+    let alpn = config
+        .alpn
+        .as_ref()
+        .map(|a| a.as_bytes().to_vec())
+        .unwrap_or_else(|| ALPN.to_vec());
     let started = Instant::now();
     let conn = endpoint
         .connect(
@@ -66,7 +71,7 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
                 endpoint_id: peer.clone(),
                 addrs: vec![TransportAddr::Relay(config.relay_url.clone())],
             },
-            ALPN.to_vec(),
+            alpn,
         )
         .await
         .map_err(fail("connect"))?;

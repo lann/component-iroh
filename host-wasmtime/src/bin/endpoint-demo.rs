@@ -84,13 +84,14 @@ struct Cli {
     role: DemoRole,
     relay: String,
     peer: Option<String>,
+    alpn: Option<String>,
     message: String,
 }
 
 fn usage() -> wasmtime::Error {
     wasmtime::Error::msg(
         "usage: endpoint-demo <composed.wasm> --role <client|server> \
-         --relay <relay-url> [--peer <endpoint-id-hex>] [--message M]",
+         --relay <relay-url> [--peer <endpoint-id-hex>] [--alpn A] [--message M]",
     )
 }
 
@@ -100,6 +101,7 @@ fn parse_args() -> Result<Cli> {
     let mut role = None;
     let mut relay = None;
     let mut peer = None;
+    let mut alpn = None;
     let mut message = "hello through the endpoint surface".to_string();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(usage);
@@ -113,6 +115,7 @@ fn parse_args() -> Result<Cli> {
             }
             "--relay" => relay = Some(value()?),
             "--peer" => peer = Some(value()?),
+            "--alpn" => alpn = Some(value()?),
             "--message" => message = value()?,
             _ => return Err(usage()),
         }
@@ -122,6 +125,7 @@ fn parse_args() -> Result<Cli> {
         role: role.ok_or_else(usage)?,
         relay: relay.ok_or_else(usage)?,
         peer,
+        alpn,
         message,
     })
 }
@@ -162,6 +166,7 @@ async fn main() -> Result<()> {
         relay_url: cli.relay,
         role,
         peer: cli.peer,
+        alpn: cli.alpn,
         message: cli.message,
     };
     let report = store

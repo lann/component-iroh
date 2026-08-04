@@ -111,6 +111,53 @@ run_pair "endpoint-relay-wasmtime-wasmtime" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
         --message "matrix endpoint" --peer
 
+# --- endpoint surface: failure paths must fail closed, in bounded time ----
+#
+# The identity-is-the-address design leaves two failure probes buildable
+# with honest components: an ALPN the server does not serve (a real TLS
+# handshake rejection through the whole stack), and a peer that does not
+# exist (the connect must time out, not hang). The wrong-key TLS pin
+# rejection itself is asserted by component-tls's rpk handshake tests.
+
+# Start a server, run a client expected to FAIL, assert it fails with a
+# connect-shaped error; the server never completes and is killed.
+#   run_client_failure <name> <with-server 0|1> <client-cmd...>
+run_client_failure() {
+    local name=$1 with_server=$2; shift 2
+    local server_pid="" server_id="0000000000000000000000000000000000000000000000000000000000000000"
+    if [ "$with_server" = 1 ]; then
+        timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
+            > "$LOGDIR/$name-server.log" 2>&1 &
+        server_pid=$!
+        for _ in $(seq 1 60); do
+            server_id=$(grep -m1 "^endpoint-id" "$LOGDIR/$name-server.log" 2>/dev/null | awk '{print $2}')
+            [ -n "$server_id" ] && break
+            sleep 0.5
+        done
+    fi
+
+    "$@" "$server_id" > "$LOGDIR/$name-client.log" 2>&1
+    local client_status=$?
+    [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null
+
+    if [ "$client_status" != 0 ] && [ "$client_status" != 124 ] \
+        && grep -qi "connect" "$LOGDIR/$name-client.log" \
+        && ! grep -q "^OK:" "$LOGDIR/$name-client.log"; then
+        echo "PASS $name"
+    else
+        echo "FAIL $name (client=$client_status, expected a bounded connect failure; logs in $LOGDIR)"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+run_client_failure "endpoint-negative-wrong-alpn" 1 \
+    timeout 60 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
+        --alpn "iroh-demo-negative/0" --peer
+
+run_client_failure "endpoint-negative-absent-peer" 0 \
+    timeout 60 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
+        --peer
+
 # --------------------------------------------------------------------------
 
 if [ "$FAILURES" != 0 ]; then

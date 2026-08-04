@@ -15,6 +15,10 @@ interface demo {
         role: role,
         /// The server peer's endpoint ID (hex). Required on the client.
         peer: option<string>,
+        /// The ALPN the client offers, overriding the demo's own —
+        /// a failure-path probe knob (an ALPN the server does not serve
+        /// must fail the handshake, not connect).
+        alpn: option<string>,
         /// The application message the client sends (the server echoes it).
         message: string,
     }
