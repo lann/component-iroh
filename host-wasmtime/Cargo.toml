@@ -1,0 +1,26 @@
+[package]
+name = "iroh-spike-host-wasmtime"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "Spike native host: runs the iroh-spike guest under Wasmtime"
+
+[[bin]]
+name = "iroh-spike-host"
+path = "src/main.rs"
+
+[dependencies]
+# The `lann:webrtc-datachannels` host implementation (a real webrtc-rs peer
+# connection behind the `connections` imports).
+wasmtime-webrtc-datachannels = { path = "../.deps/webrtc/wasmtime-impl" }
+# The `lann:webcrypto` host implementation (RustCrypto behind the crypto
+# imports the guest's TLS layer uses).
+lann-webcrypto-wasmtime = { path = "../.deps/webcrypto/rust/wasmtime" }
+wasmtime = { version = "47", features = ["component-model", "component-model-async", "async", "cranelift", "runtime"] }
+wasmtime-wasi = { version = "47", features = ["p3"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+anyhow = "1"
+env_logger = "0.11"
+# Native HTTP client backing the rendezvous host (plain HTTP/1.1 long-poll
+# against the local signaling server; no TLS needed).
+reqwest = { version = "0.12", default-features = false }

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["guest", "host-wasmtime"]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+# Sibling host/guest crates come from git worktrees under .deps (created by
+# scripts/setup.sh at pinned commits), so the spike consumes the siblings'
+# current mainline surfaces without forking them in-tree.
+[profile.release]
+lto = true
+opt-level = "s"

@@ -1,0 +1,79 @@
+package lann:iroh-spike@0.0.1;
+
+/// Ad-hoc demo signaling: a two-role blob mailbox relayed through an HTTP
+/// signaling server, used to exchange SDP, trickled ICE candidates, and
+/// endpoint identities between the two demo processes. This interface is
+/// demo plumbing for the spike only: the iroh design carries signaling over
+/// the relay connection (`lann:websocket`) once that path exists.
+interface rendezvous {
+    use lann:webrtc-datachannels/types@0.1.0.{error};
+
+    /// Which mailbox this session publishes to. The offerer role also acts
+    /// as the QUIC client; the answerer accepts.
+    enum role { offerer, answerer }
+
+    /// A joined signaling session bound to one room and role.
+    resource session {
+        /// Join `room` on the signaling server at `server` as `as-role`.
+        open: static async func(server: string, room: string, as-role: role) -> result<session, error>;
+        /// Publish one opaque blob to this session's own mailbox.
+        send: async func(blob: list<u8>) -> result<_, error>;
+        /// Fetch the next blob from the peer's mailbox; `none` once the
+        /// peer has marked its mailbox done.
+        recv: async func() -> result<option<list<u8>>, error>;
+        /// Mark this session's mailbox done.
+        done: async func() -> result<_, error>;
+    }
+}
+
+/// The spike's demo surface: one happy-path QUIC-over-data-channel run.
+///
+/// This is not the designed endpoint surface (that design is tracked
+/// upstream); it exists to drive one end-to-end connection and report what
+/// happened.
+interface demo {
+    /// Which side of the connection this process drives. The client is the
+    /// WebRTC offerer (it creates the data channel) and the QUIC client;
+    /// the server is the answerer and accepts the QUIC connection.
+    enum role { client, server }
+
+    /// One run's inputs.
+    record run-config {
+        /// Signaling server base URL, e.g. `http://127.0.0.1:8080`.
+        server: string,
+        /// Signaling room both processes join.
+        room: string,
+        /// This process's role.
+        role: role,
+        /// The application message the client sends (the server echoes it).
+        message: string,
+    }
+
+    /// One run's outcome.
+    record run-report {
+        /// This endpoint's identity: the Ed25519 public key, hex-encoded.
+        endpoint-id: string,
+        /// The authenticated peer's identity, hex-encoded.
+        peer-id: string,
+        /// Milliseconds from starting the QUIC handshake to its
+        /// completion (crypto through the WIT boundary included).
+        handshake-ms: u64,
+        /// Milliseconds from sending the application message to receiving
+        /// the echo. Zero on the server, which answers rather than sends.
+        roundtrip-ms: u64,
+        /// The application payload this side received.
+        received: string,
+    }
+
+    /// Drive one full run: signal, connect, exchange one message each way,
+    /// and report. Fails with a human-readable reason.
+    run: async func(config: run-config) -> result<run-report, string>;
+}
+
+/// One demo peer: WebRTC transport and signaling in, the demo run out.
+world iroh-spike {
+    import lann:webrtc-datachannels/connections@0.1.0;
+    import rendezvous;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    export demo;
+}

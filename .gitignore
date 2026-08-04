@@ -1,0 +1,5 @@
+/target
+/.deps
+node_modules
+/host-jco/generated
+/host-jco/build

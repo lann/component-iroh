@@ -1,0 +1,435 @@
+//! The QUIC endpoint pump: quinn-proto driven over a WebRTC data channel.
+//!
+//! One task drives everything (component-model async is a single-threaded
+//! cooperative loop). The two long-lived import futures — the channel
+//! `receive` and a fixed 50 ms clock tick — stay pinned across iterations:
+//! an in-flight import is a component-model subtask, and dropping one
+//! mid-flight cancels it in the host, which can discard a datagram the
+//! host already dequeued. Deadlines are serviced on the next tick rather
+//! than by a precise (cancellable) timer for the same reason.
+
+use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use bytes::BytesMut;
+use futures::select_biased;
+use futures::FutureExt;
+use quinn_proto::{
+    ClientConfig, Connection, ConnectionError, ConnectionHandle, DatagramEvent, Dir, Endpoint,
+    EndpointConfig, Event, ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt,
+};
+
+use crate::bindings::lann::webrtc_datachannels::connections::DataChannel;
+use crate::bindings::lann::webrtc_datachannels::types::{Error as ChannelError, Message};
+use crate::bindings::wasi::clocks::monotonic_clock;
+use crate::crypto::sign::Identity;
+use crate::quic_glue::{
+    HkdfHandshakeTokenKey, HmacSha256ResetKey, QuicClientConfig, QuicServerConfig,
+};
+use crate::tls;
+
+/// The data channel carries no addresses; quinn still wants distinct,
+/// stable socket addresses per side.
+const CLIENT_ADDR: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1111);
+const SERVER_ADDR: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 4433);
+
+/// Timer tick servicing quinn's deadlines (loss detection, idle, pacing).
+const TICK_NS: u64 = 50_000_000;
+
+/// Give the final packets (CONNECTION_CLOSE, the server's last ACKs) a
+/// bounded window to reach the wire before the task returns.
+const LINGER: Duration = Duration::from_millis(500);
+
+/// Hard cap on one run, so a wedged happy path fails rather than hangs.
+const RUN_DEADLINE: Duration = Duration::from_secs(30);
+
+/// What one side observed; the caller folds this into the demo report.
+pub struct Outcome {
+    pub peer_id: [u8; 32],
+    pub handshake_ms: u64,
+    pub roundtrip_ms: u64,
+    pub received: String,
+}
+
+/// Which half of the demo this endpoint drives.
+pub enum Role {
+    /// Connect, send `message`, expect it echoed back.
+    Client { message: String },
+    /// Accept, read one message, echo it back uppercased.
+    Server,
+}
+
+/// Transport profile for the data-channel path: fixed conservative MTU,
+/// no discovery (the channel fragments transparently, so probing would
+/// measure nothing real), one datagram per transmit (no GSO batching —
+/// each datagram becomes exactly one channel message).
+fn transport_config() -> Arc<TransportConfig> {
+    let mut config = TransportConfig::default();
+    config.initial_mtu(1200);
+    config.mtu_discovery_config(None);
+    Arc::new(config)
+}
+
+fn endpoint_config() -> Result<Arc<EndpointConfig>, String> {
+    let mut reset_key = [0u8; 32];
+    getrandom::fill(&mut reset_key).map_err(|e| format!("getrandom: {e}"))?;
+    Ok(Arc::new(EndpointConfig::new(Arc::new(
+        HmacSha256ResetKey::new(reset_key),
+    ))))
+}
+
+/// Run one endpoint over `channel` until the demo completes.
+pub async fn run(
+    identity: &Identity,
+    peer_endpoint_id: [u8; 32],
+    channel: &DataChannel,
+    role: Role,
+) -> Result<Outcome, String> {
+    let mut endpoint;
+    let mut connection: Option<(ConnectionHandle, Connection)> = None;
+
+    match &role {
+        Role::Client { .. } => {
+            endpoint = Endpoint::new(endpoint_config()?, None, true, None);
+            let tls = tls::client_config(identity, peer_endpoint_id)
+                .map_err(|e| format!("client tls config: {e}"))?;
+            let mut config = ClientConfig::new(Arc::new(QuicClientConfig::new(Arc::new(tls))));
+            config.transport_config(transport_config());
+            let pair = endpoint
+                .connect(Instant::now(), config, SERVER_ADDR, tls::SERVER_NAME)
+                .map_err(|e| format!("connect: {e}"))?;
+            connection = Some(pair);
+        }
+        Role::Server => {
+            let tls =
+                tls::server_config(identity).map_err(|e| format!("server tls config: {e}"))?;
+            let mut token_master = [0u8; 32];
+            getrandom::fill(&mut token_master).map_err(|e| format!("getrandom: {e}"))?;
+            let mut config = ServerConfig::new(
+                Arc::new(QuicServerConfig::new(Arc::new(tls))),
+                Arc::new(HkdfHandshakeTokenKey::new(&token_master)),
+            );
+            config.transport_config(transport_config());
+            endpoint = Endpoint::new(endpoint_config()?, Some(Arc::new(config)), true, None);
+        }
+    }
+
+    let started = Instant::now();
+    let mut app = App::new(role);
+    let mut buf = Vec::with_capacity(16 * 1024);
+
+    let mut recv = pin!(channel.receive().fuse());
+    let mut tick = pin!(monotonic_clock::wait_for(TICK_NS).fuse());
+
+    loop {
+        if started.elapsed() > RUN_DEADLINE {
+            return Err("run deadline exceeded".into());
+        }
+
+        // Drain endpoint-bound events, application events, and transmits
+        // until quiescent, then park on the channel or the tick.
+        if let Some((handle, conn)) = connection.as_mut() {
+            loop {
+                let mut progressed = false;
+
+                while let Some(event) = conn.poll_endpoint_events() {
+                    progressed = true;
+                    if let Some(back) = endpoint.handle_event(*handle, event) {
+                        conn.handle_event(back);
+                    }
+                }
+
+                while let Some(event) = conn.poll() {
+                    progressed = true;
+                    app.handle_event(conn, event, started)?;
+                }
+
+                loop {
+                    buf.clear();
+                    match conn.poll_transmit(Instant::now(), 1, &mut buf) {
+                        Some(transmit) => {
+                            progressed = true;
+                            send_datagram(channel, &buf[..transmit.size]).await?;
+                        }
+                        None => break,
+                    }
+                }
+
+                if !progressed {
+                    break;
+                }
+            }
+
+            app.drive(conn, started)?;
+
+            if let Some(done_at) = app.done_at {
+                if done_at.elapsed() >= LINGER || conn.is_drained() {
+                    return app.finish(conn);
+                }
+            }
+        }
+
+        select_biased! {
+            received = recv => {
+                let message = received.map_err(channel_error)?;
+                recv.set(channel.receive().fuse());
+                if let Message::Binary(datagram) = message {
+                    handle_datagram(
+                        &mut endpoint,
+                        &mut connection,
+                        channel,
+                        &mut buf,
+                        datagram,
+                    )
+                    .await?;
+                }
+            }
+            _ = tick => {
+                tick.set(monotonic_clock::wait_for(TICK_NS).fuse());
+                if let Some((_, conn)) = connection.as_mut() {
+                    let now = Instant::now();
+                    if conn.poll_timeout().is_some_and(|deadline| deadline <= now) {
+                        conn.handle_timeout(now);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_datagram(
+    endpoint: &mut Endpoint,
+    connection: &mut Option<(ConnectionHandle, Connection)>,
+    channel: &DataChannel,
+    buf: &mut Vec<u8>,
+    datagram: Vec<u8>,
+) -> Result<(), String> {
+    let now = Instant::now();
+    let remote = match connection {
+        Some((_, conn)) => conn.remote_address(),
+        None => CLIENT_ADDR,
+    };
+    buf.clear();
+    match endpoint.handle(now, remote, None, None, BytesMut::from(&datagram[..]), buf) {
+        Some(DatagramEvent::ConnectionEvent(handle, event)) => {
+            if let Some((ours, conn)) = connection.as_mut() {
+                if *ours == handle {
+                    conn.handle_event(event);
+                }
+            }
+        }
+        Some(DatagramEvent::NewConnection(incoming)) => {
+            if connection.is_none() {
+                buf.clear();
+                let pair = endpoint
+                    .accept(incoming, now, buf, None)
+                    .map_err(|e| format!("accept: {}", e.cause))?;
+                *connection = Some(pair);
+            }
+        }
+        Some(DatagramEvent::Response(transmit)) => {
+            send_datagram(channel, &buf[..transmit.size]).await?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+async fn send_datagram(channel: &DataChannel, payload: &[u8]) -> Result<(), String> {
+    channel
+        .send(Message::Binary(payload.to_vec()))
+        .await
+        .map_err(channel_error)
+}
+
+fn channel_error(err: ChannelError) -> String {
+    format!("data channel: {err:?}")
+}
+
+/// The demo application state machine, advanced by connection events.
+struct App {
+    role: Role,
+    handshake_ms: Option<u64>,
+    peer_id: Option<[u8; 32]>,
+    stream: Option<StreamId>,
+    inbound: Vec<u8>,
+    /// Client: when the message was sent. Server: unused.
+    sent_at: Option<Instant>,
+    roundtrip_ms: u64,
+    received: Option<String>,
+    /// Set when this side has nothing left to do but flush and leave.
+    done_at: Option<Instant>,
+    close_sent: bool,
+}
+
+impl App {
+    fn new(role: Role) -> Self {
+        Self {
+            role,
+            handshake_ms: None,
+            peer_id: None,
+            stream: None,
+            inbound: Vec::new(),
+            sent_at: None,
+            roundtrip_ms: 0,
+            received: None,
+            done_at: None,
+            close_sent: false,
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        conn: &mut Connection,
+        event: Event,
+        started: Instant,
+    ) -> Result<(), String> {
+        match event {
+            Event::HandshakeDataReady => {}
+            Event::Connected => {
+                self.handshake_ms = Some(started.elapsed().as_millis() as u64);
+                self.peer_id = Some(peer_endpoint_id(conn)?);
+                if let Role::Client { message } = &self.role {
+                    let message = message.clone();
+                    let id = conn
+                        .streams()
+                        .open(Dir::Bi)
+                        .ok_or("no bidirectional stream credit")?;
+                    self.stream = Some(id);
+                    let mut send = conn.send_stream(id);
+                    let wrote = send
+                        .write(message.as_bytes())
+                        .map_err(|e| format!("stream write: {e}"))?;
+                    if wrote != message.len() {
+                        return Err("demo message did not fit the stream window".into());
+                    }
+                    send.finish().map_err(|e| format!("stream finish: {e}"))?;
+                    self.sent_at = Some(Instant::now());
+                }
+            }
+            Event::Stream(StreamEvent::Opened { dir: Dir::Bi }) => {
+                if matches!(self.role, Role::Server) && self.stream.is_none() {
+                    self.stream = conn.streams().accept(Dir::Bi);
+                    // Data that arrived before the accept raises no
+                    // `Readable`; the first read is on us.
+                    if let Some(id) = self.stream {
+                        self.read_stream(conn, id)?;
+                    }
+                }
+            }
+            Event::Stream(StreamEvent::Readable { id }) => {
+                if Some(id) == self.stream {
+                    self.read_stream(conn, id)?;
+                }
+            }
+            Event::Stream(_) => {}
+            Event::DatagramReceived | Event::DatagramsUnblocked => {}
+            Event::ConnectionLost { reason } => match reason {
+                // The peer closing after the exchange is the happy path's
+                // natural end on the server side.
+                ConnectionError::ApplicationClosed(_) if self.received.is_some() => {
+                    self.done_at.get_or_insert_with(Instant::now);
+                }
+                other => return Err(format!("connection lost: {other}")),
+            },
+        }
+        Ok(())
+    }
+
+    /// Read whatever is available on `id`; on FIN, complete this side's
+    /// half of the exchange.
+    fn read_stream(&mut self, conn: &mut Connection, id: StreamId) -> Result<(), String> {
+        let mut finished = false;
+        {
+            let mut recv = conn.recv_stream(id);
+            let mut chunks = match recv.read(true) {
+                Ok(chunks) => chunks,
+                // The stream was already reset or fully read.
+                Err(_) => return Ok(()),
+            };
+            loop {
+                match chunks.next(usize::MAX) {
+                    Ok(Some(chunk)) => self.inbound.extend_from_slice(&chunk.bytes),
+                    Ok(None) => {
+                        finished = true;
+                        break;
+                    }
+                    Err(quinn_proto::ReadError::Blocked) => break,
+                    Err(e) => return Err(format!("stream read: {e}")),
+                }
+            }
+            let _ = chunks.finalize();
+        }
+
+        if !finished {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(&self.inbound).into_owned();
+        self.received = Some(text.clone());
+
+        match &self.role {
+            Role::Client { .. } => {
+                self.roundtrip_ms = self
+                    .sent_at
+                    .map(|at| at.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+            }
+            Role::Server => {
+                let echo = text.to_uppercase();
+                let mut send = conn.send_stream(id);
+                let wrote = send
+                    .write(echo.as_bytes())
+                    .map_err(|e| format!("echo write: {e}"))?;
+                if wrote != echo.len() {
+                    return Err("echo did not fit the stream window".into());
+                }
+                send.finish().map_err(|e| format!("echo finish: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Role-specific progression that is not event-driven: the client
+    /// closes once it has its echo.
+    fn drive(&mut self, conn: &mut Connection, _started: Instant) -> Result<(), String> {
+        if let Role::Client { .. } = self.role {
+            if self.received.is_some() && !self.close_sent {
+                conn.close(
+                    Instant::now(),
+                    VarInt::from_u32(0),
+                    bytes::Bytes::from_static(b"done"),
+                );
+                self.close_sent = true;
+                self.done_at = Some(Instant::now());
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, _conn: &mut Connection) -> Result<Outcome, String> {
+        Ok(Outcome {
+            peer_id: self.peer_id.ok_or("finished without a peer identity")?,
+            handshake_ms: self.handshake_ms.ok_or("finished without a handshake")?,
+            roundtrip_ms: self.roundtrip_ms,
+            received: self.received.clone().ok_or("finished without a payload")?,
+        })
+    }
+}
+
+/// The authenticated peer identity: the raw-public-key "certificate chain"
+/// is one SPKI, and the Ed25519 key inside it is the endpoint ID.
+fn peer_endpoint_id(conn: &Connection) -> Result<[u8; 32], String> {
+    let identity = conn
+        .crypto_session()
+        .peer_identity()
+        .ok_or("peer presented no identity")?;
+    let certs = identity
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .map_err(|_| "unexpected peer identity type")?;
+    let spki = certs.first().ok_or("empty peer certificate list")?;
+    tls::endpoint_id_from_spki(spki.as_ref()).ok_or_else(|| "peer key is not Ed25519".into())
+}
