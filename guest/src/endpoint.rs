@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
+use futures::future::FusedFuture;
 use futures::select_biased;
 use futures::FutureExt;
 use quinn_proto::{
@@ -125,9 +126,23 @@ pub async fn run(
     let mut recv = pin!(channel.receive().fuse());
     let mut tick = pin!(monotonic_clock::wait_for(TICK_NS).fuse());
 
-    loop {
+    // Every exit funnels through the teardown below the block: the pinned
+    // imports are in-flight component-model subtasks, and a subtask dropped
+    // mid-flight is cancelled in the host — jco-transpile 0.5.2 traps on
+    // that cancellation, so both futures must resolve before this function
+    // returns.
+    macro_rules! ok_or_break {
+        ($label:lifetime, $e:expr) => {
+            match $e {
+                Ok(value) => value,
+                Err(err) => break $label Err(err),
+            }
+        };
+    }
+
+    let outcome: Result<Outcome, String> = 'pump: loop {
         if started.elapsed() > RUN_DEADLINE {
-            return Err("run deadline exceeded".into());
+            break 'pump Err("run deadline exceeded".into());
         }
 
         // Drain endpoint-bound events, application events, and transmits
@@ -145,7 +160,7 @@ pub async fn run(
 
                 while let Some(event) = conn.poll() {
                     progressed = true;
-                    app.handle_event(conn, event, started)?;
+                    ok_or_break!('pump, app.handle_event(conn, event, started));
                 }
 
                 loop {
@@ -153,7 +168,7 @@ pub async fn run(
                     match conn.poll_transmit(Instant::now(), 1, &mut buf) {
                         Some(transmit) => {
                             progressed = true;
-                            send_datagram(channel, &buf[..transmit.size]).await?;
+                            ok_or_break!('pump, send_datagram(channel, &buf[..transmit.size]).await);
                         }
                         None => break,
                     }
@@ -164,30 +179,38 @@ pub async fn run(
                 }
             }
 
-            app.drive(conn, started)?;
+            ok_or_break!('pump, app.drive(conn, started));
 
             if let Some(done_at) = app.done_at {
                 if done_at.elapsed() >= LINGER || conn.is_drained() {
-                    return app.finish(conn);
+                    break 'pump app.finish(conn);
                 }
             }
         }
 
         select_biased! {
-            received = recv => {
-                let message = received.map_err(channel_error)?;
-                recv.set(channel.receive().fuse());
-                if let Message::Binary(datagram) = message {
-                    handle_datagram(
-                        &mut endpoint,
-                        &mut connection,
-                        channel,
-                        &mut buf,
-                        datagram,
-                    )
-                    .await?;
+            received = recv => match received {
+                Ok(message) => {
+                    recv.set(channel.receive().fuse());
+                    if let Message::Binary(datagram) = message {
+                        ok_or_break!('pump, handle_datagram(
+                            &mut endpoint,
+                            &mut connection,
+                            channel,
+                            &mut buf,
+                            datagram,
+                        )
+                        .await);
+                    }
                 }
-            }
+                // The peer tearing its side down first closes the channel
+                // under us; once this side is only lingering, that is
+                // completion, not failure.
+                Err(err) => break 'pump match (app.done_at.is_some(), connection.as_mut()) {
+                    (true, Some((_, conn))) => app.finish(conn),
+                    _ => Err(channel_error(err)),
+                },
+            },
             _ = tick => {
                 tick.set(monotonic_clock::wait_for(TICK_NS).fuse());
                 if let Some((_, conn)) = connection.as_mut() {
@@ -198,7 +221,25 @@ pub async fn run(
                 }
             }
         }
+    };
+
+    // Resolve the pinned imports: close the channel (sync, idempotent; a
+    // pending `receive` then resolves with `error.closed`), drain `recv`
+    // to its error, and let the final tick fire.
+    channel.close();
+    while !recv.is_terminated() {
+        select_biased! {
+            received = recv => if received.is_ok() {
+                recv.set(channel.receive().fuse());
+            },
+            _ = tick => tick.set(monotonic_clock::wait_for(TICK_NS).fuse()),
+        }
     }
+    if !tick.is_terminated() {
+        tick.as_mut().await;
+    }
+
+    outcome
 }
 
 async fn handle_datagram(
