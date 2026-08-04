@@ -17,7 +17,7 @@ WEBSOCKET_PIN=7b99e72f578746d74cd225d066248532d062c27b
 IROH_REPO=https://github.com/n0-computer/iroh.git
 IROH_PIN=816dd70c056b813dcb5cbfb6a9a15e12d04b72b1 # v1.0.3
 TLS_REPO=https://github.com/lann/component-tls.git
-TLS_PIN=7ab806a304c8d915029dbd14788016486bbd6495
+TLS_PIN=7dd0a7b6a8750145b03eea60e3ab9902e749dcee
 
 # Check out `repo` at `pin` under .deps/`name`, cloning or fetching as
 # needed. An existing checkout at the pin is left untouched.

@@ -1991,6 +1991,7 @@ name = "iroh-endpoint-core"
 version = "0.0.1"
 dependencies = [
  "hex",
+ "lann-tls-profile",
  "lann-tls-quinn",
  "lann-webcrypto-guest",
  "rustls",
@@ -2147,6 +2148,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lann-tls"
+version = "0.1.0"
+dependencies = [
+ "lann-tls-profile",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-rustcrypto",
+]
+
+[[package]]
 name = "lann-tls-profile"
 version = "0.1.0"
 dependencies = [
@@ -2167,6 +2178,7 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "hkdf 0.13.0",
  "hmac 0.13.0",
+ "lann-tls",
  "lann-tls-profile",
  "quinn-proto",
  "rustls",
@@ -3604,7 +3616,7 @@ dependencies = [
 [[package]]
 name = "rustls-rustcrypto"
 version = "0.0.2-alpha"
-source = "git+https://github.com/RustCrypto/rustls-rustcrypto#7b44a2de957b6596d267a920d3aec0d4137defb1"
+source = "git+https://github.com/RustCrypto/rustls-rustcrypto?rev=7b44a2de957b6596d267a920d3aec0d4137defb1#7b44a2de957b6596d267a920d3aec0d4137defb1"
 dependencies = [
  "aead 0.6.1",
  "aes-gcm 0.11.0",

@@ -8,6 +8,7 @@ description = "Shared endpoint core: the webcrypto-held identity, RPK TLS config
 [dependencies]
 # The TLS 1.3 crypto core: the lann:tls sibling's wasm-safe profile with
 # QUIC packet protection and quinn session glue, all in-guest RustCrypto.
+lann-tls-profile = { path = "../.deps/tls/rust/profile" }
 lann-tls-quinn = { path = "../.deps/tls/rust/quinn" }
 rustls = { version = "=0.23.43", default-features = false, features = ["std", "custom-provider"] }
 rustls-pki-types = "1"

@@ -7,8 +7,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use lann_webcrypto_guest::{ed25519, SigningKeyOptions};
-use rustls::pki_types::{alg_id, CertificateDer, SubjectPublicKeyInfoDer};
-use rustls::sign::{public_key_to_spki, CertifiedKey, Signer, SigningKey};
+use rustls::pki_types::{alg_id, SubjectPublicKeyInfoDer};
+use rustls::sign::{public_key_to_spki, Signer, SigningKey};
 use rustls::{Error, SignatureAlgorithm, SignatureScheme};
 
 /// A node identity: the webcrypto signing-key handle plus its public half.
@@ -46,14 +46,10 @@ impl Identity {
         })
     }
 
-    /// The RFC 7250 "certificate": the bare SPKI, carried in the TLS
-    /// Certificate message, with the webcrypto handle as its signer.
-    pub fn certified_key(&self) -> CertifiedKey {
-        CertifiedKey {
-            cert: vec![CertificateDer::from(self.key.spki.clone())],
-            key: self.key.clone(),
-            ocsp: None,
-        }
+    /// The identity as a rustls signer: the webcrypto handle behind the
+    /// `SigningKey` trait, reporting the Ed25519 SPKI as its public key.
+    pub fn signing_key(&self) -> Arc<dyn SigningKey> {
+        self.key.clone()
     }
 
     /// Sign `message` with the identity key (the relay handshake path;
