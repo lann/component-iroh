@@ -1,0 +1,39 @@
+package lann:iroh-exec-model@0.0.1;
+
+/// Execution-model probes for the endpoint surface design: whether the
+/// synchronous webcrypto bridge works inside detached tasks, and how
+/// exported component-model streams behave on each host. Experiment
+/// plumbing only; nothing here is a designed surface.
+interface probe {
+    /// Spawn a detached task that performs a webcrypto operation through
+    /// the synchronous bridge (`block_on`), and await its outcome within
+    /// this call. Returns a description of what succeeded.
+    blockon-in-spawn: async func() -> result<string, string>;
+
+    /// Start a detached pump task that waits one timer tick and then
+    /// performs a webcrypto operation through the synchronous bridge —
+    /// after this call has returned, so the bridge runs with no
+    /// originating export call alive.
+    start-pump: async func() -> result<_, string>;
+
+    /// Await and return the pump's outcome.
+    poll-pump: async func() -> result<string, string>;
+
+    /// A stream of `total` bytes the guest fills from a detached task in
+    /// `chunk`-sized writes. Dropping the reader mid-stream must resolve
+    /// the guest's pending write, not trap; `stream-outcome` reports what
+    /// the writer observed.
+    open-stream: async func(total: u32, chunk: u32) -> stream<u8>;
+
+    /// What the most recent `open-stream` writer task observed, once it
+    /// has finished.
+    stream-outcome: async func() -> result<string, string>;
+
+    /// Count the bytes received through `data` until it ends.
+    sink-stream: async func(data: stream<u8>) -> result<u32, string>;
+}
+
+world exec-model {
+    import wasi:clocks/monotonic-clock@0.3.0;
+    export probe;
+}

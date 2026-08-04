@@ -1648,6 +1648,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
+name = "iroh-exec-model-guest"
+version = "0.0.1"
+dependencies = [
+ "futures",
+ "hex",
+ "lann-webcrypto-guest",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "iroh-spike-guest"
 version = "0.0.1"
 dependencies = [
@@ -4513,6 +4523,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94c5e45f6d4cfaca727c1c48989ab3e05bb289bf84fbad226e1cfbbef2c04b7f"
 dependencies = [
  "bitflags 2.13.1",
+ "futures",
  "wit-bindgen-rust-macro",
 ]
 

@@ -1,0 +1,15 @@
+[package]
+name = "iroh-exec-model-guest"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "Execution-model probe guest: block_on-in-spawn and exported streams"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.59", features = ["async", "async-spawn"] }
+futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
+lann-webcrypto-guest = { path = "../../../.deps/webcrypto/rust/guest" }
+hex = "0.4"
