@@ -32,10 +32,8 @@ use quinn_proto::{
 };
 
 use iroh_endpoint_core::crypto::sign::Identity;
-use iroh_endpoint_core::quic_glue::{
-    HandshakeData, HkdfHandshakeTokenKey, HmacSha256ResetKey, QuicClientConfig, QuicServerConfig,
-};
 use iroh_endpoint_core::tls;
+use lann_tls_quinn::{HandshakeData, QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 
 use crate::bindings::exports::lann::iroh::endpoint::{
     Connection, Endpoint, EndpointOptions, Guest, GuestConnection, GuestEndpoint, GuestRecvStream,
@@ -508,15 +506,15 @@ impl GuestEndpoint for EndpointRes {
         getrandom::fill(&mut token_master).map_err(other)?;
 
         let server_tls = tls::server_config(&identity, options.alpns.clone()).map_err(other)?;
+        let server_quic_tls = QuicServerConfig::try_from(Arc::new(server_tls))
+            .map_err(|e| Error::Other(format!("server quic config: {e}")))?;
         let mut server_config = ServerConfig::new(
-            Arc::new(QuicServerConfig::new(Arc::new(server_tls))),
-            Arc::new(HkdfHandshakeTokenKey::new(&token_master)),
+            Arc::new(server_quic_tls),
+            Arc::new(TokenKey::new(&token_master)),
         );
         server_config.transport_config(transport_config());
         let quinn = QuinnEndpoint::new(
-            Arc::new(EndpointConfig::new(Arc::new(HmacSha256ResetKey::new(
-                reset_key,
-            )))),
+            Arc::new(EndpointConfig::new(Arc::new(ResetKey::new(&reset_key)))),
             Some(Arc::new(server_config)),
             true,
             None,
@@ -553,7 +551,9 @@ impl GuestEndpoint for EndpointRes {
         }
 
         let tls_config = tls::client_config(&self.identity, peer, vec![alpn]).map_err(other)?;
-        let mut config = ClientConfig::new(Arc::new(QuicClientConfig::new(Arc::new(tls_config))));
+        let quic_tls = QuicClientConfig::try_from(Arc::new(tls_config))
+            .map_err(|e| Error::Other(format!("client quic config: {e}")))?;
+        let mut config = ClientConfig::new(Arc::new(quic_tls));
         config.transport_config(transport_config());
 
         let handle = {

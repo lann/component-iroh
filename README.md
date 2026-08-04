@@ -77,32 +77,32 @@ Upstream iroh nodes remain reachable over plain UDP/QUIC; the WebRTC
 transport extends reach beyond what upstream's browser story (relay-only
 over WebSocket, no direct connections) can do.
 
-### Crypto through `lann:webcrypto` — the split
+### The crypto split: `lann:webcrypto` for identity, `lann:tls` in-guest
 
-`lann:webcrypto` serves **identity and handshake**; **record protection
-runs in-guest**. Specifically:
+`lann:webcrypto` serves **identity**; everything else runs **in-guest**
+under the [`lann:tls`](https://github.com/lann/component-tls) sibling's
+wasm timing-class profile (its `lann-tls-quinn` crate — ChaCha20-Poly1305
+preferred, fixsliced AES-128-GCM for conformance, RFC 9001 packet
+protection, quinn session glue). Specifically:
 
-- Node identity (Ed25519 sign/verify), discovery-record signing, the TLS
-  1.3 handshake's X25519 + HKDF, and key import/generation go through the
-  WIT surface. This is where the package's properties pay: platform-native
-  crypto in the browser, and — once its platform-backed key storage
-  direction lands — a node identity that is a *non-extractable*
-  browser-resident key, a strictly better posture than upstream
-  iroh-in-wasm holding the seed in linear memory.
-- The derived per-connection symmetric keys are exported and QUIC packet
-  protection (AEAD + header protection, per packet) runs in-guest via
-  RustCrypto. A per-packet async call across the component boundary —
-  through the browser host, an async `crypto.subtle` round trip — is
-  a hot-path cost no batching rescues, and header protection wants raw
-  AES-ECB single-block, which browser WebCrypto does not offer. The split
-  concedes nothing the threat model does not already concede: record keys
-  are ephemeral and per-connection, and the guest necessarily sees
-  plaintext anyway.
-
-Timing-channel class D (see the webcrypto provider's classification) is
-not implicated on hosted targets: the crypto runs host-side on the
-platform. The in-guest deployment inherits the provider's class A–C
-export policy.
+- Node identity (Ed25519 signing) and discovery-record signing go through
+  the WIT surface: the identity key is a *non-extractable* handle — in the
+  browser, once webcrypto's platform-backed key storage lands, a
+  browser-resident key — a strictly better posture than upstream
+  iroh-in-wasm holding the seed in linear memory. This is TLS 1.3's one
+  class-D-shaped surface (the endpoint's own CertificateVerify), and
+  delegation closes it exactly as the `lann:tls` profile prescribes.
+- Key exchange (class B, per-connection blast radius), handshake
+  verification (secret-free), the key schedule, and per-packet record
+  protection (AEAD + header protection) run in-guest. Per-packet
+  operations across a component boundary were never viable (an async
+  `crypto.subtle` round trip per packet, and header protection wants raw
+  AES-ECB single-block, which WebCrypto does not offer); the handshake
+  asymmetrics moved in-guest when `lann:tls` landed, because each
+  boundary crossing is the dominant browser-path handshake cost (measured
+  in issue #4) and the profile's timing classification covers them. The
+  original all-through-webcrypto handshake remains reconstructible by
+  provider composition if a runtime's timing story demands it.
 
 ### Deployment matrix
 

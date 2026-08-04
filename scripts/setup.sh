@@ -16,6 +16,8 @@ WEBSOCKET_REPO=https://github.com/lann/component-websocket.git
 WEBSOCKET_PIN=7b99e72f578746d74cd225d066248532d062c27b
 IROH_REPO=https://github.com/n0-computer/iroh.git
 IROH_PIN=816dd70c056b813dcb5cbfb6a9a15e12d04b72b1 # v1.0.3
+TLS_REPO=https://github.com/lann/component-tls.git
+TLS_PIN=7ab806a304c8d915029dbd14788016486bbd6495
 
 # Check out `repo` at `pin` under .deps/`name`, cloning or fetching as
 # needed. An existing checkout at the pin is left untouched.
@@ -37,6 +39,7 @@ dep webcrypto "$WEBCRYPTO_REPO" "$WEBCRYPTO_PIN"
 dep websocket "$WEBSOCKET_REPO" "$WEBSOCKET_PIN"
 # Upstream iroh: the stock relay server the demo runs against.
 dep iroh "$IROH_REPO" "$IROH_PIN"
+dep tls "$TLS_REPO" "$TLS_PIN"
 
 if [ "${SKIP_NODE:-}" != "1" ]; then
     # The webrtc sibling's jco host module resolves node-datachannel from

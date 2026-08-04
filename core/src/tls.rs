@@ -6,6 +6,11 @@
 //! What a verified connection authenticates: possession of the private key
 //! behind the presented SPKI — nothing else. The client additionally pins
 //! the server's SPKI to the endpoint ID it dialed.
+//!
+//! The configs run over `lann_tls_quinn::provider()` — the `lann:tls`
+//! profile with QUIC packet protection — so handshake verification is
+//! in-guest and secret-free; only identity signing crosses to
+//! `lann:webcrypto`.
 
 use std::sync::Arc;
 
@@ -17,8 +22,9 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::AlwaysResolvesServerRawPublicKeys;
 use rustls::{DigitallySignedStruct, DistinguishedName, Error, SignatureScheme};
 
+use lann_tls_quinn::provider;
+
 use crate::crypto::sign::Identity;
-use crate::crypto::{provider, verify_algorithms};
 
 /// The SNI placeholder sent on outgoing connections; identity lives in the
 /// SPKI pin, not the name.
@@ -47,12 +53,14 @@ pub fn client_config(
     expected_server: [u8; 32],
     alpns: Vec<Vec<u8>>,
 ) -> Result<rustls::ClientConfig, Error> {
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
+    let provider = provider();
+    let algs = provider.signature_verification_algorithms;
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(ServerIdentityVerifier {
             expected_spki: spki_for(expected_server),
-            algs: verify_algorithms(),
+            algs,
         }))
         .with_client_cert_resolver(Arc::new(AlwaysResolvesClientRawPublicKeys::new(Arc::new(
             identity.certified_key(),
@@ -67,11 +75,11 @@ pub fn server_config(
     identity: &Identity,
     alpns: Vec<Vec<u8>>,
 ) -> Result<rustls::ServerConfig, Error> {
-    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+    let provider = provider();
+    let algs = provider.signature_verification_algorithms;
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_client_cert_verifier(Arc::new(ClientIdentityVerifier {
-            algs: verify_algorithms(),
-        }))
+        .with_client_cert_verifier(Arc::new(ClientIdentityVerifier { algs }))
         .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(Arc::new(
             identity.certified_key(),
         ))));

@@ -28,10 +28,8 @@ use crate::bindings::lann::webrtc_datachannels::types::Message as ChannelMessage
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::relay::RelayConn;
 use iroh_endpoint_core::crypto::sign::Identity;
-use iroh_endpoint_core::quic_glue::{
-    HkdfHandshakeTokenKey, HmacSha256ResetKey, QuicClientConfig, QuicServerConfig,
-};
 use iroh_endpoint_core::tls;
+use lann_tls_quinn::{QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 
 /// The datagram wire QUIC runs over: one datagram per binary message on
 /// either carrier.
@@ -154,9 +152,9 @@ fn transport_config() -> Arc<TransportConfig> {
 fn endpoint_config() -> Result<Arc<EndpointConfig>, String> {
     let mut reset_key = [0u8; 32];
     getrandom::fill(&mut reset_key).map_err(|e| format!("getrandom: {e}"))?;
-    Ok(Arc::new(EndpointConfig::new(Arc::new(
-        HmacSha256ResetKey::new(reset_key),
-    ))))
+    Ok(Arc::new(EndpointConfig::new(Arc::new(ResetKey::new(
+        &reset_key,
+    )))))
 }
 
 /// Run one endpoint over `wire` until the demo completes.
@@ -179,7 +177,9 @@ pub async fn run(
             endpoint = Endpoint::new(endpoint_config()?, None, true, None);
             let tls = tls::client_config(identity, peer, vec![SPIKE_ALPN.to_vec()])
                 .map_err(|e| format!("client tls config: {e}"))?;
-            let mut config = ClientConfig::new(Arc::new(QuicClientConfig::new(Arc::new(tls))));
+            let quic_tls = QuicClientConfig::try_from(Arc::new(tls))
+                .map_err(|e| format!("client quic config: {e}"))?;
+            let mut config = ClientConfig::new(Arc::new(quic_tls));
             config.transport_config(transport_config());
             let pair = endpoint
                 .connect(Instant::now(), config, SERVER_ADDR, tls::SERVER_NAME)
@@ -191,10 +191,10 @@ pub async fn run(
                 .map_err(|e| format!("server tls config: {e}"))?;
             let mut token_master = [0u8; 32];
             getrandom::fill(&mut token_master).map_err(|e| format!("getrandom: {e}"))?;
-            let mut config = ServerConfig::new(
-                Arc::new(QuicServerConfig::new(Arc::new(tls))),
-                Arc::new(HkdfHandshakeTokenKey::new(&token_master)),
-            );
+            let quic_tls = QuicServerConfig::try_from(Arc::new(tls))
+                .map_err(|e| format!("server quic config: {e}"))?;
+            let mut config =
+                ServerConfig::new(Arc::new(quic_tls), Arc::new(TokenKey::new(&token_master)));
             config.transport_config(transport_config());
             endpoint = Endpoint::new(endpoint_config()?, Some(Arc::new(config)), true, None);
         }
