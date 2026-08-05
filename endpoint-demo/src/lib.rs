@@ -114,10 +114,13 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
     }
 
     let (send, recv) = conn.open_bi().await.map_err(fail("open-bi"))?;
+    let payload = match config.payload_bytes {
+        Some(bytes) => vec![0u8; bytes as usize],
+        None => config.message.clone().into_bytes(),
+    };
+    let payload_len = payload.len();
     let sent_at = Instant::now();
-    send.write(config.message.clone().into_bytes())
-        .await
-        .map_err(fail("write"))?;
+    send.write(payload).await.map_err(fail("write"))?;
     send.finish().map_err(fail("finish"))?;
 
     let mut echoed = Vec::new();
@@ -125,18 +128,28 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
         echoed.extend_from_slice(&chunk);
     }
     let roundtrip_ms = sent_at.elapsed().as_millis() as u64;
+    if echoed.len() != payload_len {
+        return Err(format!(
+            "echo length mismatch: sent {payload_len}, got {}",
+            echoed.len()
+        ));
+    }
     let path = path_name(conn.path());
 
     conn.close(0, "done");
     conn.wait_closed().await;
 
+    let received = match config.payload_bytes {
+        Some(_) => format!("{} bytes", echoed.len()),
+        None => String::from_utf8_lossy(&echoed).into_owned(),
+    };
     Ok(RunReport {
         endpoint_id: String::new(),
         peer_id: hex::encode(conn.peer()),
         path,
         handshake_ms,
         roundtrip_ms,
-        received: String::from_utf8_lossy(&echoed).into_owned(),
+        received,
     })
 }
 
@@ -148,12 +161,18 @@ async fn run_server(endpoint: &Endpoint) -> Result<RunReport, String> {
     while let Some(chunk) = recv.read(READ_MAX).await.map_err(fail("read"))? {
         inbound.extend_from_slice(&chunk);
     }
-    let text = String::from_utf8_lossy(&inbound).into_owned();
 
-    let echo = text.to_uppercase();
-    send.write(echo.clone().into_bytes())
-        .await
-        .map_err(fail("write"))?;
+    // The uppercase transform is a small-message affordance; bulk
+    // payloads echo verbatim and report a summary, not megabytes.
+    const SUMMARY_LIMIT: usize = 4096;
+    let (echo, received) = if inbound.len() <= SUMMARY_LIMIT {
+        let text = String::from_utf8_lossy(&inbound).into_owned();
+        (text.to_uppercase().into_bytes(), text)
+    } else {
+        let summary = format!("{} bytes", inbound.len());
+        (inbound, summary)
+    };
+    send.write(echo).await.map_err(fail("write"))?;
     send.finish().map_err(fail("finish"))?;
     let path = path_name(conn.path());
 
@@ -167,7 +186,7 @@ async fn run_server(endpoint: &Endpoint) -> Result<RunReport, String> {
         path,
         handshake_ms: 0,
         roundtrip_ms: 0,
-        received: text,
+        received,
     })
 }
 

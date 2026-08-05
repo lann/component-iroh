@@ -57,5 +57,10 @@ probes: build build-components
 matrix: build transpile relay-build
     ./scripts/matrix.sh
 
+# The measured-claims gate: per-wire latency/throughput medians and the
+# webcrypto boundary call counts, asserted against budgets (issue #4).
+bench: build transpile relay-build
+    ./scripts/bench.sh
+
 # The full gate.
-ci: fmt-check clippy validate-wit test probes matrix
+ci: fmt-check clippy validate-wit test probes matrix bench

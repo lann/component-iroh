@@ -36,6 +36,11 @@ interface demo {
         /// process's own (`relay-url` stays the home relay). The
         /// client dials and signals through this relay.
         peer-relay: option<string>,
+        /// Replace the client's message with this many zero bytes: a
+        /// bulk transfer for throughput measurement. The echo still
+        /// round-trips the full payload; `roundtrip-ms` then measures
+        /// bulk transfer, not latency.
+        payload-bytes: option<u64>,
         /// The application message the client sends (the server echoes it).
         message: string,
     }

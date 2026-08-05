@@ -21,6 +21,7 @@ const { values } = parseArgs({
     direct: { type: "string" },
     webrtc: { type: "boolean", default: false },
     "peer-relay": { type: "string" },
+    "payload-bytes": { type: "string" },
     message: { type: "string", default: "hello through the endpoint surface" },
   },
 });
@@ -44,6 +45,7 @@ async function main() {
     direct: values.direct,
     webrtc: values.webrtc,
     peerRelay: values["peer-relay"],
+    payloadBytes: values["payload-bytes"] ? BigInt(values["payload-bytes"]) : undefined,
     message,
   });
 
