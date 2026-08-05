@@ -41,11 +41,14 @@ record (and usually an issue to resolve), not a refactor.
 - **Wire-format compatibility with upstream iroh on UDP paths** (discovery
   records, relay protocol, `n0_nat_traversal`, ALPN dispatch) is a feature,
   not an accident. A change that breaks it needs an explicit ruling.
-- **The crypto split**: identity, discovery-record signing, and the TLS 1.3
-  handshake go through `lann:webcrypto`; per-packet record protection
-  (AEAD + header protection) runs in-guest on exported per-connection keys.
-  Do not move per-packet operations across the component boundary, and do
-  not move identity keys into guest memory on platforms whose host can hold
+- **The crypto split**: `lann:webcrypto` serves identity — key generation,
+  public-key export, and signing (discovery records, relay auth, the TLS
+  CertificateVerify). Everything else — peer verification, key agreement,
+  the key-derivation ladder, transcript hashing, and per-packet record
+  protection — runs in-guest through `lann:tls` (the #5 ruling; the
+  README's crypto-split section is the authoritative statement). Do not
+  move per-packet operations across the component boundary, and do not
+  move identity keys into guest memory on platforms whose host can hold
   them.
 - **Sans-I/O core, injected edges.** The QUIC/endpoint core is sans-I/O;
   transports (`wasi:sockets` UDP, `lann:webrtc-datachannels`,
