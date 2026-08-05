@@ -62,5 +62,10 @@ matrix: build transpile relay-build
 bench: build transpile relay-build
     ./scripts/bench.sh
 
+# The endpoint against n0's production relays over wss (issue #2).
+# Internet-dependent by nature, so manual: not part of `ci`.
+interop-prod: build
+    ./scripts/interop-prod.sh
+
 # The full gate.
 ci: fmt-check clippy validate-wit test probes matrix bench

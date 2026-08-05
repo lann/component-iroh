@@ -166,7 +166,17 @@ design names, a WebRTC data channel and the relay connection itself.
   browser-compatible path; the challenge signature comes from the
   webcrypto identity handle), and datagram frames addressed by endpoint
   ID. Frame encodings are pinned by known-answer tests mirroring
-  upstream's own snapshot vectors.
+  upstream's own snapshot vectors. What the endpoint requires of a
+  relay is exactly that subset — ws(s) upgrade at `/relay`, the
+  `iroh-relay-v2`/`v1` subprotocols, challenge auth, datagram
+  forwarding, pings answered; it sends no QAD probes (address
+  discovery for the native UDP path is issue #12's scope, and a
+  browser leg has no UDP address to discover). This holds against
+  production deployments, not just the pinned checkout: `just
+  interop-prod` runs the echo, the WebRTC upgrade (signaling forwarded
+  by the production relay), and a cross-relay dial against n0's public
+  relay infrastructure over wss, unmodified. No component-iroh relay
+  flavor is needed.
 - **Pairing is by endpoint ID**, iroh's model: the guest prints its ID at
   startup, the client is handed the server's (`--peer`), and a server
   learns the client's from the relay-authenticated source of the first
@@ -214,38 +224,38 @@ npm install && npm run transpile`, then `npm run start -- --role
 The designed surface (`wit/iroh.wit`, issue #3) has a first
 implementation: `endpoint/` exports `lann:iroh/endpoint@0.1.0` —
 `bind`/`connect`/`accept` by endpoint ID, multiple connections, QUIC
-streams as resources — over the relay wire, with `endpoint-demo/` as its
-first consumer, composed via `wac plug` and driven by
+streams as resources — over three wires behind one surface: the relay
+(a pooled set, so peers on foreign relays are dialable), direct UDP
+via `wasi:sockets`, and WebRTC data channels as a background upgrade
+(a relay-dialed connection moves onto the channel when it opens;
+`connection.path` reports the move). Upstream interop is proven both
+ways over UDP against iroh v1.0.3, and against n0's production relay
+infrastructure over wss. `endpoint-demo/` is the first consumer,
+composed via `wac plug` and driven by
 `host-wasmtime/src/bin/endpoint-demo.rs`. Internally: one detached pump
 task per bound endpoint owns all I/O, and resource methods observe its
 consequences by bounded polling on the clock import (cross-task wakeups
 have no channel that works on every host today; see the issues). The
 jco leg of this surface is blocked on an upstream jco scheduler defect;
-the JS consumer driver (`host-jco/src/run-endpoint.mjs`) is ready for
-when it lands.
+the JS consumer drivers (`host-jco/src/run-endpoint.mjs`,
+`run-endpoint-demo.mjs`) are ready for when it lands.
 
 `just matrix` runs every claimed pairing — both spike wires across all
-four host pairings plus the composed endpoint demo — against a stock
-`iroh-relay`; `just ci` is the full gate.
+four host pairings plus the composed endpoint demo on every wire,
+cross-relay included — against stock `iroh-relay` servers; `just
+bench` gates the measured claims; `just ci` is the full gate. `just
+interop-prod` (manual, internet-dependent) checks the production
+relays.
 
 ## Open questions
 
 Tracked as issues; the headline ones:
 
-- QUIC-over-data-channel mechanics: MTU budget under DTLS+SCTP overhead,
-  disabling SCTP's own retransmission/ordering (unreliable, unordered
-  channels) so QUIC's loss recovery and congestion control see a datagram
-  wire, and pacing interaction.
-- Relay protocol fidelity: how much of iroh's relay wire protocol
-  (QAD probes, the home-relay handshake) is reusable verbatim over
-  `lann:websocket`, versus needing a component-iroh relay flavor.
-- The endpoint surface as WIT: what component-iroh itself *exports* — a
-  `connect`/`accept`-by-`EndpointID` interface with QUIC streams as
-  component-model `stream`s, so application protocols (blobs, gossip)
-  become plain consumer components composed onto the endpoint.
-- Handshake latency through the WIT crypto boundary: acceptable by
-  budget (a handful of round trips per connection), to be confirmed by
-  measurement, not assumption.
-- Whether `quinn-proto`'s crypto traits admit an external key-schedule
-  cleanly, or the TLS layer needs a purpose-built raw-public-key TLS 1.3
-  client/server over `lann:webcrypto` primitives.
+- The endpoint surface's remaining half (issue #3): router-style
+  composition (multiple ALPN protocols behind one endpoint) and QUIC
+  datagrams.
+- Direct UDP as an upgrade target (issue #12): disco-style datagram
+  attribution and reachability probing, the native half of address
+  discovery.
+- The jco browser leg (issue #10): upstream scheduler work, with the
+  root cause and partial fixes recorded on lann/jco#11 and PR #27.
