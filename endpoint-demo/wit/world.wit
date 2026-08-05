@@ -28,8 +28,9 @@ interface demo {
         /// connection prefers the UDP path.
         direct: option<string>,
         /// Enables the WebRTC wire. The server answers signaling; the
-        /// client also adds a `webrtc` entry to the peer's address, so
-        /// the connection prefers the channel over the relay.
+        /// client also adds a `webrtc` entry to the peer's address and
+        /// waits for the connection's path to reach the channel before
+        /// sending, so the echo exercises the upgraded path.
         webrtc: bool,
         /// The application message the client sends (the server echoes it).
         message: string,
@@ -41,6 +42,9 @@ interface demo {
         endpoint-id: string,
         /// The authenticated peer's identity, hex-encoded.
         peer-id: string,
+        /// The wire carrying the connection when the exchange finished
+        /// (`relay`, `ip`, or `webrtc`).
+        path: string,
         /// Milliseconds from starting `connect` to it resolving. Zero on
         /// the server.
         handshake-ms: u64,
@@ -59,5 +63,6 @@ interface demo {
 
 world iroh-demo {
     import lann:iroh/endpoint@0.1.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
     export demo;
 }

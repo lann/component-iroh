@@ -200,9 +200,10 @@ async fn main() -> Result<()> {
                 DemoRole::Server => "server",
             };
             println!(
-                "iroh-demo ({role}): endpoint={} peer={} handshake_ms={} roundtrip_ms={} received={:?}",
+                "iroh-demo ({role}): endpoint={} peer={} path={} handshake_ms={} roundtrip_ms={} received={:?}",
                 report.endpoint_id,
                 report.peer_id,
+                report.path,
                 report.handshake_ms,
                 report.roundtrip_ms,
                 report.received

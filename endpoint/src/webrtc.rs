@@ -232,10 +232,21 @@ async fn consume_signaling(
     Ok(())
 }
 
+/// Background upgrade: the offerer dance for `peer`, moving the peer's
+/// route onto the channel on success. Spawned by the pump for each
+/// relay-dialed connection that carried a `webrtc` hint. Failure is
+/// silent: the connection stays on the relay, and the caller observes
+/// the path through `connection.path`.
+pub async fn upgrade(shared: Shared, peer: [u8; 32]) {
+    let Ok(wire) = dial(&shared, peer).await else {
+        return;
+    };
+    let _ = shared.borrow_mut().register_channel(peer, wire);
+}
+
 /// Dial `peer` over WebRTC: the offerer's dance, resolving once the
-/// channel is `open` and QUIC may flow. The caller registers the wire
-/// and dials QUIC over its synthetic address.
-pub async fn dial(shared: &Shared, peer: [u8; 32]) -> Result<Rc<ChannelWire>, Error> {
+/// channel is `open` and QUIC may flow.
+async fn dial(shared: &Shared, peer: [u8; 32]) -> Result<Rc<ChannelWire>, Error> {
     shared.borrow_mut().begin_signaling(peer)?;
     let _guard = SessionGuard {
         shared: shared.clone(),
@@ -290,9 +301,9 @@ pub async fn dial(shared: &Shared, peer: [u8; 32]) -> Result<Rc<ChannelWire>, Er
 }
 
 /// Answer `peer`'s offer: the answerer's dance, spawned by the pump on
-/// the first signal from a peer without a session. On success the wire
-/// registers itself in the shared state; inbound QUIC then flows through
-/// the pump and quinn accepts it like any connection.
+/// the first signal from a peer without a session. On success the
+/// channel registers and the peer's route moves onto it; inbound QUIC
+/// then flows through the pump under the peer's standin address.
 pub async fn answer(shared: Shared, peer: [u8; 32]) {
     let _guard = SessionGuard {
         shared: shared.clone(),

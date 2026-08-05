@@ -47,8 +47,8 @@ async function main() {
 
   console.log(
     `iroh-demo (${role}): endpoint=${report.endpointId} peer=${report.peerId} ` +
-      `handshake_ms=${report.handshakeMs} roundtrip_ms=${report.roundtripMs} ` +
-      `received=${JSON.stringify(report.received)}`,
+      `path=${report.path} handshake_ms=${report.handshakeMs} ` +
+      `roundtrip_ms=${report.roundtripMs} received=${JSON.stringify(report.received)}`,
   );
   console.log(`OK: ${role} finished.`);
 }

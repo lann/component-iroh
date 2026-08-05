@@ -9,13 +9,14 @@
 //! a resource method parked. Resource methods mutate the shared quinn
 //! state directly and kick the pump to flush the consequences.
 //!
-//! v0 narrowings (each a recorded latitude, not a design ruling): one
-//! path is dialed per connection, by fixed precedence `ip` (with a
-//! bound socket), `webrtc` (when enabled), then relay — no racing,
-//! fallback, or migration; `custom` entries are ignored; one signaling
-//! session per peer at a time; one relay per endpoint (a peer on a
-//! different relay fails `connect-failed`, for dialing and for
-//! signaling); and `bind` requires a relay URL.
+//! v0 narrowings (each a recorded latitude, not a design ruling): the
+//! dial path is `ip` (with a bound socket) or the relay — no racing or
+//! fallback between them; a `webrtc` entry upgrades a relay-dialed
+//! connection in the background (flip on channel open, flip back on
+//! channel death — no quality-based selection); `custom` entries are
+//! ignored; one signaling session per peer at a time; one relay per
+//! endpoint (a peer on a different relay fails `connect-failed`, for
+//! dialing and for signaling); and `bind` requires a relay URL.
 
 mod endpoint_impl;
 mod relay;

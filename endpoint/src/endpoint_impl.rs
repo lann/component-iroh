@@ -40,7 +40,9 @@ use crate::bindings::exports::lann::iroh::endpoint::{
     Connection, Endpoint, EndpointOptions, Guest, GuestConnection, GuestEndpoint, GuestRecvStream,
     GuestSendStream, RecvStream, SendStream,
 };
-use crate::bindings::lann::iroh::types::{ConnectionState, EndpointAddr, Error, TransportAddr};
+use crate::bindings::lann::iroh::types::{
+    ConnectionState, EndpointAddr, Error, PathKind, TransportAddr,
+};
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::bindings::wit_stream;
 use crate::relay::RelayConn;
@@ -82,9 +84,15 @@ pub(crate) struct State {
     accept_queue: VecDeque<ConnectionHandle>,
     relay_outbound: VecDeque<([u8; 32], Vec<u8>)>,
     udp_outbound: VecDeque<(SocketAddr, Vec<u8>)>,
-    /// Transmits bound for WebRTC channels, keyed by the channel's
-    /// synthetic address.
-    channel_outbound: VecDeque<(SocketAddr, Vec<u8>)>,
+    /// Transmits bound for WebRTC channels, keyed by channel id.
+    channel_outbound: VecDeque<(u32, Vec<u8>)>,
+    /// The wire currently carrying each synthetic peer address.
+    /// Transmits to an address with no entry go to the UDP socket
+    /// (real addresses are never in this map).
+    routes: HashMap<SocketAddr, RouteWire>,
+    /// Peers whose relay-dialed connections asked for a WebRTC
+    /// upgrade; the pump spawns one offerer session per entry.
+    pending_upgrades: Vec<[u8; 32]>,
     /// Whether this endpoint dials `webrtc` entries and answers
     /// inbound signaling (`endpoint-options.webrtc`).
     webrtc_enabled: bool,
@@ -94,16 +102,23 @@ pub(crate) struct State {
     /// Inbound signaling payloads (the JSON after the prefix byte),
     /// keyed by the relay-authenticated source. Sessions poll these.
     signal_inboxes: HashMap<[u8; 32], VecDeque<Vec<u8>>>,
-    /// Open channels by synthetic address.
-    channels: HashMap<SocketAddr, ChannelEntry>,
+    /// Open channels by id: route targets, not quinn addresses.
+    channels: HashMap<u32, ChannelEntry>,
     /// Channels registered since the pump last armed receives.
-    new_channels: Vec<(SocketAddr, Rc<ChannelWire>)>,
-    next_channel_host: u32,
+    new_channels: Vec<(u32, Rc<ChannelWire>)>,
+    next_channel_id: u32,
     closed: bool,
     closed_at: Option<Instant>,
     /// Set when the relay connection died; every operation fails from
     /// then on.
     dead: Option<String>,
+}
+
+/// The wire behind one synthetic peer address.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RouteWire {
+    Relay,
+    Channel(u32),
 }
 
 struct ChannelEntry {
@@ -161,23 +176,27 @@ impl State {
             relay_outbound: VecDeque::new(),
             udp_outbound: VecDeque::new(),
             channel_outbound: VecDeque::new(),
+            routes: HashMap::new(),
+            pending_upgrades: Vec::new(),
             webrtc_enabled,
             signaling: HashSet::new(),
             signal_inboxes: HashMap::new(),
             channels: HashMap::new(),
             new_channels: Vec::new(),
-            next_channel_host: 0,
+            next_channel_id: 0,
             closed: false,
             closed_at: None,
             dead: None,
         }
     }
 
-    /// The stable synthetic socket address standing in for `peer` on the
-    /// relay wire (the wire has no addresses; quinn wants distinct,
-    /// stable ones). Drawn from `2001:db8:77::/48` — the IPv6
-    /// documentation prefix is never routable, so no real peer address
-    /// can collide with a standin.
+    /// The stable synthetic socket address standing in for `peer` (the
+    /// relay and channel wires have no addresses; quinn wants one
+    /// distinct, stable address per peer, whichever wire carries the
+    /// packets). Drawn from `2001:db8:77::/48` — the IPv6 documentation
+    /// prefix is never routable, so no real peer address can collide
+    /// with a standin. A fresh standin routes to the relay until a
+    /// channel upgrade moves it.
     fn addr_for_peer(&mut self, peer: [u8; 32]) -> SocketAddr {
         if let Some(addr) = self.peer_to_addr.get(&peer) {
             return *addr;
@@ -186,6 +205,7 @@ impl State {
         let addr = doc_prefix_addr(0x77, self.next_host);
         self.peer_to_addr.insert(peer, addr);
         self.addr_to_peer.insert(addr, peer);
+        self.routes.insert(addr, RouteWire::Relay);
         addr
     }
 
@@ -221,31 +241,45 @@ impl State {
         self.signal_inboxes.get_mut(&peer)?.pop_front()
     }
 
-    /// Register an open channel to `peer`: allocate its synthetic
-    /// address (`2001:db8:78::/48`, same non-routable documentation
-    /// prefix as the relay standins) and hand it to the pump to arm a
-    /// receive. Returns the address quinn dials or accepts on. A
-    /// closing endpoint refuses and closes the wire instead.
+    /// Register an open channel to `peer` and move the peer's route
+    /// onto it: quinn keeps addressing the peer's standin while the
+    /// packets change wire. The pump arms the channel's receive on its
+    /// next turn. A closing endpoint refuses and closes the wire.
     pub(crate) fn register_channel(
         &mut self,
         peer: [u8; 32],
         wire: Rc<ChannelWire>,
-    ) -> Result<SocketAddr, Error> {
+    ) -> Result<(), Error> {
         if self.is_closed_or_dead() {
             wire.close();
             return Err(Error::Closed);
         }
-        self.next_channel_host += 1;
-        let addr = doc_prefix_addr(0x78, self.next_channel_host);
+        self.next_channel_id += 1;
+        let id = self.next_channel_id;
         self.channels.insert(
-            addr,
+            id,
             ChannelEntry {
                 wire: wire.clone(),
                 peer,
             },
         );
-        self.new_channels.push((addr, wire));
-        Ok(addr)
+        self.new_channels.push((id, wire));
+        let synthetic = self.addr_for_peer(peer);
+        self.routes.insert(synthetic, RouteWire::Channel(id));
+        Ok(())
+    }
+
+    /// Retire a dead channel; a peer routed over it moves back to the
+    /// relay (its connections survive the move or idle out).
+    fn retire_channel(&mut self, id: u32) {
+        let Some(entry) = self.channels.remove(&id) else {
+            return;
+        };
+        if let Some(synthetic) = self.peer_to_addr.get(&entry.peer) {
+            if self.routes.get(synthetic) == Some(&RouteWire::Channel(id)) {
+                self.routes.insert(*synthetic, RouteWire::Relay);
+            }
+        }
     }
 
     fn mark_dead(&mut self, reason: &str) {
@@ -269,7 +303,7 @@ impl State {
             relay_outbound,
             udp_outbound,
             channel_outbound,
-            channels,
+            routes,
             ..
         } = self;
         for (handle, entry) in conns.iter_mut() {
@@ -295,15 +329,20 @@ impl State {
                         Some(transmit) => {
                             progressed = true;
                             let datagram = buf[..transmit.size].to_vec();
-                            // Route by the destination's address space:
-                            // relay standins, channel standins, then
-                            // real addresses to the UDP socket.
-                            if let Some(peer) = addr_to_peer.get(&transmit.destination) {
-                                relay_outbound.push_back((*peer, datagram));
-                            } else if channels.contains_key(&transmit.destination) {
-                                channel_outbound.push_back((transmit.destination, datagram));
-                            } else {
-                                udp_outbound.push_back((transmit.destination, datagram));
+                            // Route by the standin's current wire; real
+                            // addresses have no route entry and go to
+                            // the UDP socket.
+                            match routes.get(&transmit.destination) {
+                                Some(RouteWire::Relay) => {
+                                    let peer = addr_to_peer[&transmit.destination];
+                                    relay_outbound.push_back((peer, datagram));
+                                }
+                                Some(RouteWire::Channel(id)) => {
+                                    channel_outbound.push_back((*id, datagram));
+                                }
+                                None => {
+                                    udp_outbound.push_back((transmit.destination, datagram));
+                                }
                             }
                         }
                         None => break,
@@ -329,15 +368,16 @@ impl State {
         self.handle_datagram(remote, None, payload);
     }
 
-    /// A datagram from a channel enters quinn under the channel's
-    /// synthetic address, attributed to the signaling-authenticated
-    /// peer (connections accepted over it must authenticate as that
-    /// identity, like relay-accepted ones).
-    fn handle_channel_datagram(&mut self, addr: SocketAddr, payload: Vec<u8>) {
-        let Some(peer) = self.channels.get(&addr).map(|entry| entry.peer) else {
+    /// A datagram from a channel enters quinn under the peer's standin
+    /// — the same address the relay wire uses, so an upgraded
+    /// connection sees one unbroken path — attributed to the
+    /// signaling-authenticated peer.
+    fn handle_channel_datagram(&mut self, id: u32, payload: Vec<u8>) {
+        let Some(peer) = self.channels.get(&id).map(|entry| entry.peer) else {
             return;
         };
-        self.handle_datagram(addr, Some(peer), payload);
+        let synthetic = self.addr_for_peer(peer);
+        self.handle_datagram(synthetic, Some(peer), payload);
     }
 
     fn handle_datagram(&mut self, addr: SocketAddr, source: Option<[u8; 32]>, payload: Vec<u8>) {
@@ -526,11 +566,11 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
         loop {
             let item = shared.borrow_mut().channel_outbound.pop_front();
             match item {
-                Some((addr, datagram)) => {
+                Some((id, datagram)) => {
                     let wire = shared
                         .borrow()
                         .channels
-                        .get(&addr)
+                        .get(&id)
                         .map(|entry| entry.wire.clone());
                     if let Some(wire) = wire {
                         // A send failure on a channel is datagram loss,
@@ -543,11 +583,16 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
             }
         }
 
-        // Arm receives for channels registered since the last turn.
+        // Arm receives for channels registered since the last turn, and
+        // spawn offerer sessions for requested upgrades.
         {
             let new_channels = std::mem::take(&mut shared.borrow_mut().new_channels);
-            for (addr, wire) in new_channels {
-                channel_recvs.push(Box::pin(channel_receive(addr, wire)));
+            for (id, wire) in new_channels {
+                channel_recvs.push(Box::pin(channel_receive(id, wire)));
+            }
+            let upgrades = std::mem::take(&mut shared.borrow_mut().pending_upgrades);
+            for peer in upgrades {
+                wit_bindgen::spawn_local(webrtc::upgrade(shared.clone(), peer));
             }
         }
 
@@ -598,27 +643,28 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
                 }
             },
             event = next_channel_event(&mut channel_recvs).fuse() => {
-                let (addr, result) = event;
+                let (id, result) = event;
                 match result {
                     Ok(payload) => {
                         // Re-arm before handling so the wire keeps
-                        // flowing; a channel removed meanwhile stays
+                        // flowing; a channel retired meanwhile stays
                         // retired.
                         let wire = shared
                             .borrow()
                             .channels
-                            .get(&addr)
+                            .get(&id)
                             .map(|entry| entry.wire.clone());
                         if let Some(wire) = wire {
-                            channel_recvs.push(Box::pin(channel_receive(addr, wire)));
+                            channel_recvs.push(Box::pin(channel_receive(id, wire)));
                         }
                         if let Some(datagram) = payload {
-                            shared.borrow_mut().handle_channel_datagram(addr, datagram);
+                            shared.borrow_mut().handle_channel_datagram(id, datagram);
                         }
                     }
                     Err(_) => {
-                        // The channel died; its connections idle out.
-                        shared.borrow_mut().channels.remove(&addr);
+                        // The channel died; the peer's route moves back
+                        // to the relay.
+                        shared.borrow_mut().retire_channel(id);
                     }
                 }
             },
@@ -669,15 +715,12 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
 }
 
 type ChannelRecvFuture =
-    futures::future::LocalBoxFuture<'static, (SocketAddr, Result<Option<Vec<u8>>, String>)>;
+    futures::future::LocalBoxFuture<'static, (u32, Result<Option<Vec<u8>>, String>)>;
 
-/// One channel receive, tagged with the channel's synthetic address.
-async fn channel_receive(
-    addr: SocketAddr,
-    wire: Rc<ChannelWire>,
-) -> (SocketAddr, Result<Option<Vec<u8>>, String>) {
+/// One channel receive, tagged with the channel's id.
+async fn channel_receive(id: u32, wire: Rc<ChannelWire>) -> (u32, Result<Option<Vec<u8>>, String>) {
     let result = wire.receive().await;
-    (addr, result)
+    (id, result)
 }
 
 /// The next completed channel receive, or pending-forever while no
@@ -686,7 +729,7 @@ async fn channel_receive(
 /// dropping the wrapper between select turns cancels nothing.
 async fn next_channel_event(
     set: &mut FuturesUnordered<ChannelRecvFuture>,
-) -> (SocketAddr, Result<Option<Vec<u8>>, String>) {
+) -> (u32, Result<Option<Vec<u8>>, String>) {
     if set.is_empty() {
         std::future::pending().await
     } else {
@@ -736,8 +779,8 @@ fn other(detail: impl std::fmt::Display) -> Error {
 
 /// A synthetic socket address under the IPv6 documentation prefix
 /// (RFC 3849, `2001:db8::/32`): `2001:db8:<space>::<hi>:<lo>`, port
-/// 4433. Documentation addresses are never routable, so synthetic
-/// spaces cannot collide with real peers.
+/// 4433. Documentation addresses are never routable, so standins
+/// cannot collide with real peers.
 fn doc_prefix_addr(space: u16, host: u32) -> SocketAddr {
     SocketAddr::new(
         IpAddr::V6(Ipv6Addr::new(
@@ -879,13 +922,13 @@ impl GuestEndpoint for EndpointRes {
             .as_slice()
             .try_into()
             .map_err(|_| Error::InvalidArgument("endpoint id is not 32 bytes".into()))?;
-        // One path is dialed, by fixed precedence: `ip` (with a bound
-        // socket), then `webrtc` (when enabled), then the relay. No
-        // racing — a chosen path that never answers fails by timeout
-        // rather than falling back.
+        // The dial path: the first parseable `ip` entry when a socket
+        // is bound, the relay otherwise — no racing or fallback. A
+        // `webrtc` entry is an upgrade hint: the connection starts on
+        // the relay and moves to the channel when it opens.
         let webrtc_enabled = self.shared.borrow().webrtc_enabled;
         let mut direct: Option<SocketAddr> = None;
-        let mut webrtc_path = false;
+        let mut webrtc_hint = false;
         for entry in &addr.addrs {
             match entry {
                 TransportAddr::Relay(url) => {
@@ -907,7 +950,7 @@ impl GuestEndpoint for EndpointRes {
                                 .into(),
                         ));
                     }
-                    webrtc_path = true;
+                    webrtc_hint = true;
                 }
                 TransportAddr::Webrtc(_) => {}
                 TransportAddr::Custom(_) => {}
@@ -920,23 +963,12 @@ impl GuestEndpoint for EndpointRes {
         let mut config = ClientConfig::new(Arc::new(quic_tls));
         config.transport_config(transport_config());
 
-        // The WebRTC dance happens before quinn dials: the wire must be
-        // open for the first flight (issue #8).
-        let remote = match (direct, webrtc_path) {
-            (Some(real), _) => Some(real),
-            (None, true) => {
-                let wire = webrtc::dial(&self.shared, peer).await?;
-                Some(self.shared.borrow_mut().register_channel(peer, wire)?)
-            }
-            (None, false) => None,
-        };
-
         let handle = {
             let mut st = self.shared.borrow_mut();
             if st.dead.is_some() || st.closed {
                 return Err(Error::Closed);
             }
-            let remote = match remote {
+            let remote = match direct {
                 Some(real) => real,
                 None => st.addr_for_peer(peer),
             };
@@ -946,6 +978,11 @@ impl GuestEndpoint for EndpointRes {
                 .map_err(|e| Error::ConnectFailed(e.to_string()))?;
             st.conns
                 .insert(handle, ConnEntry::new(conn, Some(peer), false));
+            // The upgrade dance overlaps the handshake; the route flip
+            // is invisible to quinn (same standin address).
+            if webrtc_hint && direct.is_none() {
+                st.pending_upgrades.push(peer);
+            }
             handle
         };
 
@@ -1065,6 +1102,19 @@ impl GuestConnection for ConnectionRes {
                 ConnectionState::Connecting
             }
         })
+    }
+
+    fn path(&self) -> PathKind {
+        let st = self.shared.borrow();
+        let Some(entry) = st.conns.get(&self.handle) else {
+            return PathKind::Relay;
+        };
+        match st.routes.get(&entry.conn.remote_address()) {
+            Some(RouteWire::Channel(_)) => PathKind::Webrtc,
+            Some(RouteWire::Relay) => PathKind::Relay,
+            // Real addresses are never in the route table.
+            None => PathKind::Ip,
+        }
     }
 
     async fn open_bi(&self) -> Result<(SendStream, RecvStream), Error> {

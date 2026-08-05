@@ -16,13 +16,18 @@ mod bindings {
 
 use bindings::exports::lann::iroh_demo::demo::{Guest, Role, RunConfig, RunReport};
 use bindings::lann::iroh::endpoint::{Connection, Endpoint, EndpointOptions};
-use bindings::lann::iroh::types::{EndpointAddr, Error, TransportAddr};
+use bindings::lann::iroh::types::{EndpointAddr, Error, PathKind, TransportAddr};
+use bindings::wasi::clocks::monotonic_clock;
 
 /// The demo's ALPN protocol.
 const ALPN: &[u8] = b"iroh-demo/0";
 
 /// Cap on one read call; the demo's payloads are tiny.
 const READ_MAX: u32 = 16 * 1024;
+
+/// Polling quantum and bound while waiting for the WebRTC upgrade.
+const UPGRADE_POLL_NS: u64 = 5_000_000;
+const UPGRADE_DEADLINE_POLLS: u32 = 30_000 / 5;
 
 struct Component;
 
@@ -91,6 +96,19 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
         .map_err(fail("connect"))?;
     let handshake_ms = started.elapsed().as_millis() as u64;
 
+    // The upgrade runs in the background; this demo exists to exercise
+    // the wire it asked for, so wait for the flip before sending.
+    if config.webrtc {
+        let mut polls = 0;
+        while conn.path() != PathKind::Webrtc {
+            polls += 1;
+            if polls > UPGRADE_DEADLINE_POLLS {
+                return Err("webrtc upgrade did not complete".into());
+            }
+            monotonic_clock::wait_for(UPGRADE_POLL_NS).await;
+        }
+    }
+
     let (send, recv) = conn.open_bi().await.map_err(fail("open-bi"))?;
     let sent_at = Instant::now();
     send.write(config.message.clone().into_bytes())
@@ -103,6 +121,7 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
         echoed.extend_from_slice(&chunk);
     }
     let roundtrip_ms = sent_at.elapsed().as_millis() as u64;
+    let path = path_name(conn.path());
 
     conn.close(0, "done");
     conn.wait_closed().await;
@@ -110,6 +129,7 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
     Ok(RunReport {
         endpoint_id: String::new(),
         peer_id: hex::encode(conn.peer()),
+        path,
         handshake_ms,
         roundtrip_ms,
         received: String::from_utf8_lossy(&echoed).into_owned(),
@@ -131,6 +151,7 @@ async fn run_server(endpoint: &Endpoint) -> Result<RunReport, String> {
         .await
         .map_err(fail("write"))?;
     send.finish().map_err(fail("finish"))?;
+    let path = path_name(conn.path());
 
     // The client closes once it has its echo; that close is the demo's
     // natural end on this side.
@@ -139,10 +160,20 @@ async fn run_server(endpoint: &Endpoint) -> Result<RunReport, String> {
     Ok(RunReport {
         endpoint_id: String::new(),
         peer_id: hex::encode(conn.peer()),
+        path,
         handshake_ms: 0,
         roundtrip_ms: 0,
         received: text,
     })
+}
+
+fn path_name(path: PathKind) -> String {
+    match path {
+        PathKind::Relay => "relay",
+        PathKind::Ip => "ip",
+        PathKind::Webrtc => "webrtc",
+    }
+    .to_string()
 }
 
 fn fail(what: &'static str) -> impl Fn(Error) -> String {

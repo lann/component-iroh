@@ -29,8 +29,11 @@ interface types {
         ip(string),
         /// Reachable over a WebRTC data channel, negotiated by signaling
         /// through the given relay server (a URL). Both peers must hold
-        /// a connection to that relay. This case is this package's own;
-        /// it maps to a `custom` entry in upstream iroh address records
+        /// a connection to that relay. An entry of this kind is an
+        /// upgrade hint, not a dial target: the connection starts on
+        /// the relay and moves to the channel once it opens (see
+        /// `endpoint.connect`). This case is this package's own; it
+        /// maps to a `custom` entry in upstream iroh address records
         /// (the mapping is fixed when discovery lands).
         webrtc(string),
         /// An address for a transport this package predates.
@@ -70,6 +73,18 @@ interface types {
         closed,
     }
 
+    /// The wire currently carrying a `connection`'s packets. Read it
+    /// with `connection.path`; it can change over the connection's
+    /// life (see `connect` for the upgrade behavior).
+    enum path-kind {
+        /// Datagrams travel through a relay server.
+        relay,
+        /// Datagrams travel over a direct UDP socket.
+        ip,
+        /// Datagrams travel over a WebRTC data channel.
+        webrtc,
+    }
+
     /// Errors surfaced by the endpoint surface. The `string` payloads
     /// are human-readable diagnostics for logging; do not match on
     /// their contents.
@@ -96,7 +111,7 @@ interface types {
 /// The stateful endpoint surface: one identity, its connections, and
 /// their streams.
 interface endpoint {
-    use types.{endpoint-id, endpoint-addr, connection-state, error};
+    use types.{endpoint-id, endpoint-addr, connection-state, path-kind, error};
 
     /// Configuration for `endpoint.bind`.
     record endpoint-options {
@@ -145,11 +160,17 @@ interface endpoint {
         /// key fails `connect-failed`, never connects. The connection's
         /// ALPN is `alpn`, refused by the peer if it does not serve it.
         ///
-        /// One path is dialed, chosen from `addr.addrs` by fixed
-        /// precedence: `ip` (when a UDP socket is bound), then `webrtc`
-        /// (when `endpoint-options.webrtc` is set), then `relay`. There
-        /// is no fallback between paths: a chosen path that does not
-        /// answer fails `connect-failed` by timeout.
+        /// The dial path: the first parseable `ip` entry when a UDP
+        /// socket is bound, the relay otherwise. There is no fallback
+        /// between dial paths: a chosen path that does not answer fails
+        /// `connect-failed` by timeout.
+        ///
+        /// A `webrtc` entry (with `endpoint-options.webrtc` set)
+        /// upgrades a relay-dialed connection in the background: the
+        /// handshake and early data run on the relay, and the packets
+        /// move to the data channel once it opens — `connection.path`
+        /// reports the move. A failed upgrade leaves the connection on
+        /// the relay; a channel that later dies moves it back.
         connect: async func(addr: endpoint-addr, alpn: list<u8>) -> result<connection, error>;
 
         /// The next accepted connection.
@@ -180,6 +201,12 @@ interface endpoint {
         /// The connection's current lifecycle state. `closed` is
         /// terminal and latched.
         state: func() -> connection-state;
+
+        /// The wire currently carrying this connection's packets. Not
+        /// latched: a background upgrade moves a relay-dialed
+        /// connection to `webrtc` when its channel opens, and back to
+        /// `relay` if the channel dies (see `endpoint.connect`).
+        path: func() -> path-kind;
 
         /// Open a bidirectional stream. Resolves when stream credit is
         /// available.
