@@ -1,24 +1,26 @@
 //! The `lann:iroh` endpoint component: `connect`/`accept` by endpoint ID,
-//! QUIC end-to-end, over the iroh relay wire and direct UDP.
+//! QUIC end-to-end, over the iroh relay wire, direct UDP, and WebRTC
+//! data channels.
 //!
 //! One `bind` mints an identity, opens the home relay connection, binds
 //! the UDP socket when asked, and spawns a detached pump task that owns
-//! all I/O: relay and UDP datagrams in and out, quinn's timers, and the
-//! wake-ups for every future a resource method parked. Resource methods
-//! mutate the shared quinn state directly and kick the pump to flush the
-//! consequences.
+//! all I/O: relay, UDP, and channel datagrams in and out, WebRTC
+//! signaling dispatch, quinn's timers, and the wake-ups for every future
+//! a resource method parked. Resource methods mutate the shared quinn
+//! state directly and kick the pump to flush the consequences.
 //!
-//! v0 narrowings (each a recorded latitude, not a design ruling): the
-//! wires are the relay and, when `udp-bind-addr` is set, direct UDP —
-//! `connect` dials the first parseable `ip` entry when a socket exists,
-//! with no relay fallback or racing; `custom` entries are ignored;
-//! WebRTC lands as another wire behind the same surface; one relay per
-//! endpoint (dialing a peer on a different relay fails `connect-failed`);
-//! and `bind` requires a relay URL.
+//! v0 narrowings (each a recorded latitude, not a design ruling): one
+//! path is dialed per connection, by fixed precedence `ip` (with a
+//! bound socket), `webrtc` (when enabled), then relay — no racing,
+//! fallback, or migration; `custom` entries are ignored; one signaling
+//! session per peer at a time; one relay per endpoint (a peer on a
+//! different relay fails `connect-failed`, for dialing and for
+//! signaling); and `bind` requires a relay URL.
 
 mod endpoint_impl;
 mod relay;
 mod udp;
+mod webrtc;
 
 pub(crate) mod bindings {
     wit_bindgen::generate!({

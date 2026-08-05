@@ -2603,6 +2603,8 @@ dependencies = [
  "lann-webcrypto-guest",
  "quinn-proto",
  "rustls",
+ "serde",
+ "serde_json",
  "wit-bindgen 0.59.0",
 ]
 

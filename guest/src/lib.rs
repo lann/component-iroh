@@ -45,7 +45,7 @@ mod demo {
         DataChannel, DataChannelOptions, PeerConnection,
     };
     use crate::bindings::lann::webrtc_datachannels::types::{
-        IceCandidate, SdpType, SessionDescription,
+        DataChannelState, IceCandidate, SdpType, SessionDescription,
     };
     use crate::endpoint;
     use crate::relay::RelayConn;
@@ -202,6 +202,8 @@ mod demo {
         let channel = peer
             .create_data_channel(quic_channel_options())
             .map_err(rtc)?;
+        // Take the once-only state stream before anything can transition.
+        let mut states = channel.state_changes();
 
         let offer = peer.create_offer().await.map_err(rtc)?;
         let offer_sdp = offer.sdp.clone();
@@ -213,6 +215,24 @@ mod demo {
         consume_signaling(&peer, signaling).await?;
 
         peer.wait_connected().await.map_err(rtc)?;
+
+        // The first flight must not race the answerer's still-forming
+        // channel: wait for `open`, not ICE-connected, or the Initial
+        // is lost and recovered by a loss probe (issue #8).
+        loop {
+            let (status, batch) = states.read(Vec::with_capacity(1)).await;
+            if batch.contains(&DataChannelState::Open) {
+                break;
+            }
+            if batch.contains(&DataChannelState::Closed)
+                || matches!(
+                    status,
+                    wit_bindgen::StreamResult::Dropped | wit_bindgen::StreamResult::Cancelled
+                )
+            {
+                return Err("data channel closed before opening".into());
+            }
+        }
         Ok((peer, channel))
     }
 

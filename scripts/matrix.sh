@@ -148,6 +148,18 @@ run_pair "endpoint-udp-wasmtime-wasmtime" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
         --udp-bind 127.0.0.1:0 --message "matrix udp" --direct @DIRECT@ --peer
 
+# The WebRTC wire: SDP/ICE signaled through the relay (a 0x00-prefixed
+# datagram convention a stock relay just forwards), then QUIC over the
+# unreliable channel. connect() prefers the webrtc entry with no relay
+# fallback, so a passing echo is the assertion that QUIC flowed over
+# the channel; the relay carried only signaling for this connection.
+run_pair "endpoint-webrtc-wasmtime-wasmtime" \
+    env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$EHOST" "$COMPOSED_WASM" \
+        --role server --relay "$RELAY_URL" --webrtc -- \
+    env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$EHOST" "$COMPOSED_WASM" \
+        --role client --relay "$RELAY_URL" --webrtc \
+        --message "matrix webrtc" --peer
+
 # --- upstream interop: wire-format compatibility with iroh v1 -------------
 #
 # The same echo against the real iroh implementation (tools/iroh-peer:

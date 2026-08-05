@@ -19,6 +19,7 @@ const { values } = parseArgs({
     alpn: { type: "string" },
     "udp-bind": { type: "string" },
     direct: { type: "string" },
+    webrtc: { type: "boolean", default: false },
     message: { type: "string", default: "hello through the endpoint surface" },
   },
 });
@@ -29,7 +30,7 @@ async function main() {
     throw new Error(
       "usage: run-endpoint-demo.mjs --role <client|server> --relay <url> " +
         "[--peer <endpoint-id-hex>] [--alpn A] [--udp-bind <ip:port>] " +
-        "[--direct <ip:port>] [--message M]",
+        "[--direct <ip:port>] [--webrtc] [--message M]",
     );
   }
 
@@ -40,6 +41,7 @@ async function main() {
     alpn,
     udpBind: values["udp-bind"],
     direct: values.direct,
+    webrtc: values.webrtc,
     message,
   });
 

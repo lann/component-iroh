@@ -27,6 +27,10 @@ interface demo {
         /// to the peer's address ahead of the relay entry, so the
         /// connection prefers the UDP path.
         direct: option<string>,
+        /// Enables the WebRTC wire. The server answers signaling; the
+        /// client also adds a `webrtc` entry to the peer's address, so
+        /// the connection prefers the channel over the relay.
+        webrtc: bool,
         /// The application message the client sends (the server echoes it).
         message: string,
     }

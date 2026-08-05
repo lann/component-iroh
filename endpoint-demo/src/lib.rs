@@ -32,6 +32,7 @@ impl Guest for Component {
             alpns: vec![ALPN.to_vec()],
             relay_url: Some(config.relay_url.clone()),
             udp_bind_addr: config.udp_bind.clone(),
+            webrtc: config.webrtc,
         })
         .await
         .map_err(fail("bind"))?;
@@ -72,6 +73,9 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
     let mut addrs = Vec::new();
     if let Some(direct) = &config.direct {
         addrs.push(TransportAddr::Ip(direct.clone()));
+    }
+    if config.webrtc {
+        addrs.push(TransportAddr::Webrtc(config.relay_url.clone()));
     }
     addrs.push(TransportAddr::Relay(config.relay_url.clone()));
     let started = Instant::now();

@@ -14,8 +14,8 @@
 //! await.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use futures::future::FusedFuture;
-use futures::{select_biased, FutureExt};
+use futures::stream::FuturesUnordered;
+use futures::{select_biased, FutureExt, StreamExt};
 use quinn_proto::{
     ClientConfig, Connection as QuinnConnection, ConnectionError, ConnectionHandle, DatagramEvent,
     Dir, Endpoint as QuinnEndpoint, EndpointConfig, Event, FinishError, ReadError, ReadableError,
@@ -44,6 +45,7 @@ use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::bindings::wit_stream;
 use crate::relay::RelayConn;
 use crate::udp::UdpWire;
+use crate::webrtc::{self, ChannelWire, SIGNAL_PREFIX};
 use crate::Component;
 use wit_bindgen::rt::async_support::StreamReader;
 
@@ -52,14 +54,16 @@ use wit_bindgen::rt::async_support::StreamReader;
 const TICK_NS: u64 = 10_000_000;
 
 /// Resource methods' polling quantum while waiting on pump consequences.
-const POLL_NS: u64 = 5_000_000;
+pub(crate) const POLL_NS: u64 = 5_000_000;
 
 /// Bounded window for final packets after `endpoint.close`.
 const LINGER: Duration = Duration::from_millis(500);
 
-/// Transport profile for relayed paths: fixed conservative MTU, no
-/// discovery (the relay fragments transparently, so probing would measure
-/// nothing real), one datagram per transmit.
+/// The transport profile shared by every wire (the issue #1 v0 ruling):
+/// fixed conservative 1200-byte MTU, no discovery — the relay and the
+/// data channel fragment transparently, so probing would measure
+/// nothing real, and a fixed size never engages that fragmentation —
+/// one datagram per transmit.
 fn transport_config() -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
     config.initial_mtu(1200);
@@ -67,9 +71,9 @@ fn transport_config() -> Arc<TransportConfig> {
     Arc::new(config)
 }
 
-type Shared = Rc<RefCell<State>>;
+pub(crate) type Shared = Rc<RefCell<State>>;
 
-struct State {
+pub(crate) struct State {
     quinn: QuinnEndpoint,
     conns: HashMap<ConnectionHandle, ConnEntry>,
     peer_to_addr: HashMap<[u8; 32], SocketAddr>,
@@ -78,11 +82,35 @@ struct State {
     accept_queue: VecDeque<ConnectionHandle>,
     relay_outbound: VecDeque<([u8; 32], Vec<u8>)>,
     udp_outbound: VecDeque<(SocketAddr, Vec<u8>)>,
+    /// Transmits bound for WebRTC channels, keyed by the channel's
+    /// synthetic address.
+    channel_outbound: VecDeque<(SocketAddr, Vec<u8>)>,
+    /// Whether this endpoint dials `webrtc` entries and answers
+    /// inbound signaling (`endpoint-options.webrtc`).
+    webrtc_enabled: bool,
+    /// Peers with an active signaling session (offerer or answerer);
+    /// one session per peer at a time.
+    signaling: HashSet<[u8; 32]>,
+    /// Inbound signaling payloads (the JSON after the prefix byte),
+    /// keyed by the relay-authenticated source. Sessions poll these.
+    signal_inboxes: HashMap<[u8; 32], VecDeque<Vec<u8>>>,
+    /// Open channels by synthetic address.
+    channels: HashMap<SocketAddr, ChannelEntry>,
+    /// Channels registered since the pump last armed receives.
+    new_channels: Vec<(SocketAddr, Rc<ChannelWire>)>,
+    next_channel_host: u32,
     closed: bool,
     closed_at: Option<Instant>,
     /// Set when the relay connection died; every operation fails from
     /// then on.
     dead: Option<String>,
+}
+
+struct ChannelEntry {
+    wire: Rc<ChannelWire>,
+    /// The relay-authenticated peer the channel was signaled with;
+    /// connections accepted over it must authenticate as this identity.
+    peer: [u8; 32],
 }
 
 struct ConnEntry {
@@ -122,7 +150,7 @@ impl ConnEntry {
 }
 
 impl State {
-    fn new(quinn: QuinnEndpoint) -> Self {
+    fn new(quinn: QuinnEndpoint, webrtc_enabled: bool) -> Self {
         Self {
             quinn,
             conns: HashMap::new(),
@@ -132,33 +160,92 @@ impl State {
             accept_queue: VecDeque::new(),
             relay_outbound: VecDeque::new(),
             udp_outbound: VecDeque::new(),
+            channel_outbound: VecDeque::new(),
+            webrtc_enabled,
+            signaling: HashSet::new(),
+            signal_inboxes: HashMap::new(),
+            channels: HashMap::new(),
+            new_channels: Vec::new(),
+            next_channel_host: 0,
             closed: false,
             closed_at: None,
             dead: None,
         }
     }
 
-    /// The stable fake socket address standing in for `peer` (the relay
-    /// wire has no addresses; quinn wants distinct, stable ones).
-    ///
-    /// Hazard: the fake space is `10.77.x.y:4433`. `drain()` routes
-    /// transmits to the relay by fake-addr lookup, so a real peer that
-    /// is genuinely reachable at such an address would be misrouted.
-    /// Loopback and public-internet peers cannot collide; a 10/8
-    /// deployment could.
+    /// The stable synthetic socket address standing in for `peer` on the
+    /// relay wire (the wire has no addresses; quinn wants distinct,
+    /// stable ones). Drawn from `2001:db8:77::/48` — the IPv6
+    /// documentation prefix is never routable, so no real peer address
+    /// can collide with a standin.
     fn addr_for_peer(&mut self, peer: [u8; 32]) -> SocketAddr {
         if let Some(addr) = self.peer_to_addr.get(&peer) {
             return *addr;
         }
         self.next_host += 1;
-        let host = self.next_host;
-        let addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8)),
-            4433,
-        );
+        let addr = doc_prefix_addr(0x77, self.next_host);
         self.peer_to_addr.insert(peer, addr);
         self.addr_to_peer.insert(addr, peer);
         addr
+    }
+
+    /// True once no operation can succeed anymore; signaling sessions
+    /// poll this to abandon their dance.
+    pub(crate) fn is_closed_or_dead(&self) -> bool {
+        self.closed || self.dead.is_some()
+    }
+
+    /// Claim the signaling slot for `peer`; one session at a time.
+    pub(crate) fn begin_signaling(&mut self, peer: [u8; 32]) -> Result<(), Error> {
+        if !self.signaling.insert(peer) {
+            return Err(Error::ConnectFailed(
+                "a webrtc signaling session with this peer is already active".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Release `peer`'s signaling slot and drop its unread signals.
+    pub(crate) fn end_signaling(&mut self, peer: [u8; 32]) {
+        self.signaling.remove(&peer);
+        self.signal_inboxes.remove(&peer);
+    }
+
+    /// Queue one signaling payload for the pump to relay to `peer`.
+    pub(crate) fn push_signal_outbound(&mut self, peer: [u8; 32], payload: Vec<u8>) {
+        self.relay_outbound.push_back((peer, payload));
+    }
+
+    /// The next signaling payload from `peer`, if any.
+    pub(crate) fn pop_signal_inbox(&mut self, peer: [u8; 32]) -> Option<Vec<u8>> {
+        self.signal_inboxes.get_mut(&peer)?.pop_front()
+    }
+
+    /// Register an open channel to `peer`: allocate its synthetic
+    /// address (`2001:db8:78::/48`, same non-routable documentation
+    /// prefix as the relay standins) and hand it to the pump to arm a
+    /// receive. Returns the address quinn dials or accepts on. A
+    /// closing endpoint refuses and closes the wire instead.
+    pub(crate) fn register_channel(
+        &mut self,
+        peer: [u8; 32],
+        wire: Rc<ChannelWire>,
+    ) -> Result<SocketAddr, Error> {
+        if self.is_closed_or_dead() {
+            wire.close();
+            return Err(Error::Closed);
+        }
+        self.next_channel_host += 1;
+        let addr = doc_prefix_addr(0x78, self.next_channel_host);
+        self.channels.insert(
+            addr,
+            ChannelEntry {
+                wire: wire.clone(),
+                peer,
+            },
+        );
+        self.new_channels.push((addr, wire));
+        Ok(addr)
     }
 
     fn mark_dead(&mut self, reason: &str) {
@@ -181,6 +268,8 @@ impl State {
             accept_queue,
             relay_outbound,
             udp_outbound,
+            channel_outbound,
+            channels,
             ..
         } = self;
         for (handle, entry) in conns.iter_mut() {
@@ -205,14 +294,16 @@ impl State {
                     match entry.conn.poll_transmit(now, 1, &mut buf) {
                         Some(transmit) => {
                             progressed = true;
-                            match addr_to_peer.get(&transmit.destination) {
-                                Some(peer) => {
-                                    relay_outbound.push_back((*peer, buf[..transmit.size].to_vec()))
-                                }
-                                None => udp_outbound.push_back((
-                                    transmit.destination,
-                                    buf[..transmit.size].to_vec(),
-                                )),
+                            let datagram = buf[..transmit.size].to_vec();
+                            // Route by the destination's address space:
+                            // relay standins, channel standins, then
+                            // real addresses to the UDP socket.
+                            if let Some(peer) = addr_to_peer.get(&transmit.destination) {
+                                relay_outbound.push_back((*peer, datagram));
+                            } else if channels.contains_key(&transmit.destination) {
+                                channel_outbound.push_back((transmit.destination, datagram));
+                            } else {
+                                udp_outbound.push_back((transmit.destination, datagram));
                             }
                         }
                         None => break,
@@ -236,6 +327,17 @@ impl State {
 
     fn handle_udp_datagram(&mut self, remote: SocketAddr, payload: Vec<u8>) {
         self.handle_datagram(remote, None, payload);
+    }
+
+    /// A datagram from a channel enters quinn under the channel's
+    /// synthetic address, attributed to the signaling-authenticated
+    /// peer (connections accepted over it must authenticate as that
+    /// identity, like relay-accepted ones).
+    fn handle_channel_datagram(&mut self, addr: SocketAddr, payload: Vec<u8>) {
+        let Some(peer) = self.channels.get(&addr).map(|entry| entry.peer) else {
+            return;
+        };
+        self.handle_datagram(addr, Some(peer), payload);
     }
 
     fn handle_datagram(&mut self, addr: SocketAddr, source: Option<[u8; 32]>, payload: Vec<u8>) {
@@ -387,11 +489,14 @@ fn on_event(
 /// and the flush after every kick. The two long-lived import futures stay
 /// pinned across iterations and are resolved before the task returns (an
 /// in-flight import is a component-model subtask; jco traps on cancelling
-/// one — see the spike's teardown discipline).
+/// one — see the spike's teardown discipline). Channel receives live in a
+/// persistent set with the same discipline: closing every channel
+/// resolves them before the task returns.
 async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
     let mut recv = pin!(relay.recv_datagram().fuse());
     let mut udp_recv = pin!(udp_receive(udp.clone()).fuse());
     let mut tick = pin!(monotonic_clock::wait_for(TICK_NS).fuse());
+    let mut channel_recvs: FuturesUnordered<ChannelRecvFuture> = FuturesUnordered::new();
 
     'pump: loop {
         shared.borrow_mut().drain();
@@ -418,6 +523,33 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
                 (None, _) => break,
             }
         }
+        loop {
+            let item = shared.borrow_mut().channel_outbound.pop_front();
+            match item {
+                Some((addr, datagram)) => {
+                    let wire = shared
+                        .borrow()
+                        .channels
+                        .get(&addr)
+                        .map(|entry| entry.wire.clone());
+                    if let Some(wire) = wire {
+                        // A send failure on a channel is datagram loss,
+                        // not death (the channel's own close resolves
+                        // its receive, which retires it below).
+                        let _ = wire.send(&datagram).await;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        // Arm receives for channels registered since the last turn.
+        {
+            let new_channels = std::mem::take(&mut shared.borrow_mut().new_channels);
+            for (addr, wire) in new_channels {
+                channel_recvs.push(Box::pin(channel_receive(addr, wire)));
+            }
+        }
 
         {
             let st = shared.borrow();
@@ -440,9 +572,13 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
             received = recv => match received {
                 Ok(datagram) => {
                     recv.set(relay.recv_datagram().fuse());
-                    shared
-                        .borrow_mut()
-                        .handle_relay_datagram(datagram.source, datagram.payload);
+                    if datagram.payload.first() == Some(&SIGNAL_PREFIX) {
+                        handle_signal(&shared, datagram.source, &datagram.payload[1..]);
+                    } else {
+                        shared
+                            .borrow_mut()
+                            .handle_relay_datagram(datagram.source, datagram.payload);
+                    }
                 }
                 Err(err) => {
                     shared.borrow_mut().mark_dead(&err);
@@ -461,6 +597,31 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
                     udp_recv.set(futures::future::Fuse::terminated());
                 }
             },
+            event = next_channel_event(&mut channel_recvs).fuse() => {
+                let (addr, result) = event;
+                match result {
+                    Ok(payload) => {
+                        // Re-arm before handling so the wire keeps
+                        // flowing; a channel removed meanwhile stays
+                        // retired.
+                        let wire = shared
+                            .borrow()
+                            .channels
+                            .get(&addr)
+                            .map(|entry| entry.wire.clone());
+                        if let Some(wire) = wire {
+                            channel_recvs.push(Box::pin(channel_receive(addr, wire)));
+                        }
+                        if let Some(datagram) = payload {
+                            shared.borrow_mut().handle_channel_datagram(addr, datagram);
+                        }
+                    }
+                    Err(_) => {
+                        // The channel died; its connections idle out.
+                        shared.borrow_mut().channels.remove(&addr);
+                    }
+                }
+            },
             _ = tick => {
                 tick.set(monotonic_clock::wait_for(TICK_NS).fuse());
                 shared.borrow_mut().handle_timeouts();
@@ -471,10 +632,20 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
     // Resolve the pinned imports before the task ends: close the relay
     // (its pending receive resolves with the closed error), self-wake the
     // UDP socket (a zero-length datagram to our own address resolves its
-    // pending receive), and let the final tick fire.
+    // pending receive), close every channel (each pending receive
+    // resolves with the closed error), and let the final tick fire.
     relay.close();
     if let Some(wire) = &udp {
         let _ = wire.self_wake().await;
+    }
+    let channel_wires: Vec<Rc<ChannelWire>> = shared
+        .borrow()
+        .channels
+        .values()
+        .map(|entry| entry.wire.clone())
+        .collect();
+    for wire in &channel_wires {
+        wire.close();
     }
     while !recv.is_terminated() {
         select_biased! {
@@ -482,14 +653,69 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
                 recv.set(relay.recv_datagram().fuse());
             },
             _ = udp_recv => {}
+            _ = next_channel_event(&mut channel_recvs).fuse() => {}
             _ = tick => tick.set(monotonic_clock::wait_for(TICK_NS).fuse()),
         }
     }
     if udp.is_some() && !udp_recv.is_terminated() {
         udp_recv.as_mut().await.ok();
     }
+    while !channel_recvs.is_empty() {
+        let _ = channel_recvs.next().await;
+    }
     if !tick.is_terminated() {
         tick.as_mut().await;
+    }
+}
+
+type ChannelRecvFuture =
+    futures::future::LocalBoxFuture<'static, (SocketAddr, Result<Option<Vec<u8>>, String>)>;
+
+/// One channel receive, tagged with the channel's synthetic address.
+async fn channel_receive(
+    addr: SocketAddr,
+    wire: Rc<ChannelWire>,
+) -> (SocketAddr, Result<Option<Vec<u8>>, String>) {
+    let result = wire.receive().await;
+    (addr, result)
+}
+
+/// The next completed channel receive, or pending-forever while no
+/// channel exists (the select needs an arm either way). The set owns
+/// the in-flight import futures; this wrapper only polls it, so
+/// dropping the wrapper between select turns cancels nothing.
+async fn next_channel_event(
+    set: &mut FuturesUnordered<ChannelRecvFuture>,
+) -> (SocketAddr, Result<Option<Vec<u8>>, String>) {
+    if set.is_empty() {
+        std::future::pending().await
+    } else {
+        set.next().await.expect("a non-empty set yields an item")
+    }
+}
+
+/// Inbound signaling: file the payload in the peer's inbox, spawning an
+/// answerer session for a peer without one. Discarded entirely when the
+/// WebRTC wire is disabled or the endpoint is closing.
+fn handle_signal(shared: &Shared, source: [u8; 32], payload: &[u8]) {
+    /// Unread-signal cap per peer; a flooding peer loses signals, not us.
+    const INBOX_CAP: usize = 64;
+    let spawn_answerer = {
+        let mut st = shared.borrow_mut();
+        if !st.webrtc_enabled || st.is_closed_or_dead() {
+            return;
+        }
+        // Claim the slot synchronously with the decision, so a second
+        // datagram cannot spawn a second session.
+        let spawn_answerer = st.signaling.insert(source);
+        let inbox = st.signal_inboxes.entry(source).or_default();
+        if inbox.len() < INBOX_CAP {
+            inbox.push_back(payload.to_vec());
+        }
+        spawn_answerer
+    };
+    if spawn_answerer {
+        wit_bindgen::spawn_local(webrtc::answer(shared.clone(), source));
     }
 }
 
@@ -506,6 +732,26 @@ async fn udp_receive(
 
 fn other(detail: impl std::fmt::Display) -> Error {
     Error::Other(detail.to_string())
+}
+
+/// A synthetic socket address under the IPv6 documentation prefix
+/// (RFC 3849, `2001:db8::/32`): `2001:db8:<space>::<hi>:<lo>`, port
+/// 4433. Documentation addresses are never routable, so synthetic
+/// spaces cannot collide with real peers.
+fn doc_prefix_addr(space: u16, host: u32) -> SocketAddr {
+    SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::new(
+            0x2001,
+            0xdb8,
+            space,
+            0,
+            0,
+            0,
+            (host >> 16) as u16,
+            host as u16,
+        )),
+        4433,
+    )
 }
 
 /// Poll `check` against the shared state until it produces a value,
@@ -608,7 +854,7 @@ impl GuestEndpoint for EndpointRes {
             None => None,
         };
 
-        let shared = Rc::new(RefCell::new(State::new(quinn)));
+        let shared = Rc::new(RefCell::new(State::new(quinn, options.webrtc)));
         wit_bindgen::spawn_local(pump(shared.clone(), Rc::new(relay), udp.clone()));
 
         Ok(Endpoint::new(EndpointRes {
@@ -633,11 +879,13 @@ impl GuestEndpoint for EndpointRes {
             .as_slice()
             .try_into()
             .map_err(|_| Error::InvalidArgument("endpoint id is not 32 bytes".into()))?;
-        // The direct path wins when it exists: the first parseable `ip`
-        // entry, dialed over our bound socket. No racing yet — a
-        // direct-dialed peer that never answers fails by timeout rather
-        // than falling back to the relay.
+        // One path is dialed, by fixed precedence: `ip` (with a bound
+        // socket), then `webrtc` (when enabled), then the relay. No
+        // racing — a chosen path that never answers fails by timeout
+        // rather than falling back.
+        let webrtc_enabled = self.shared.borrow().webrtc_enabled;
         let mut direct: Option<SocketAddr> = None;
+        let mut webrtc_path = false;
         for entry in &addr.addrs {
             match entry {
                 TransportAddr::Relay(url) => {
@@ -652,6 +900,16 @@ impl GuestEndpoint for EndpointRes {
                         direct = text.parse().ok();
                     }
                 }
+                TransportAddr::Webrtc(url) if webrtc_enabled => {
+                    if url.trim_end_matches('/') != self.relay_url.trim_end_matches('/') {
+                        return Err(Error::ConnectFailed(
+                            "webrtc signaling through a foreign relay is not implemented yet"
+                                .into(),
+                        ));
+                    }
+                    webrtc_path = true;
+                }
+                TransportAddr::Webrtc(_) => {}
                 TransportAddr::Custom(_) => {}
             }
         }
@@ -662,12 +920,23 @@ impl GuestEndpoint for EndpointRes {
         let mut config = ClientConfig::new(Arc::new(quic_tls));
         config.transport_config(transport_config());
 
+        // The WebRTC dance happens before quinn dials: the wire must be
+        // open for the first flight (issue #8).
+        let remote = match (direct, webrtc_path) {
+            (Some(real), _) => Some(real),
+            (None, true) => {
+                let wire = webrtc::dial(&self.shared, peer).await?;
+                Some(self.shared.borrow_mut().register_channel(peer, wire)?)
+            }
+            (None, false) => None,
+        };
+
         let handle = {
             let mut st = self.shared.borrow_mut();
             if st.dead.is_some() || st.closed {
                 return Err(Error::Closed);
             }
-            let remote = match direct {
+            let remote = match remote {
                 Some(real) => real,
                 None => st.addr_for_peer(peer),
             };

@@ -53,7 +53,7 @@ async function main() {
     );
   }
 
-  const ep = await iroh.Endpoint.bind({ alpns: [ALPN], relayUrl: relay });
+  const ep = await iroh.Endpoint.bind({ alpns: [ALPN], relayUrl: relay, webrtc: false });
   console.log(`endpoint-id ${hex(ep.id())}`);
 
   let report;
