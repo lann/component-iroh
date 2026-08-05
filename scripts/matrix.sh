@@ -122,10 +122,13 @@ done
 # --- endpoint surface: the wac-composed demo under wasmtime ---------------
 #
 # The jco leg of the endpoint surface is blocked by upstream jco: its
-# scheduler stops delivering waitable events once a detached task holds
-# in-flight imports across export calls (tracked in this repository's
-# issues; the JS driver host-jco/src/run-endpoint.mjs is ready for when
-# it works).
+# per-component execution slot serializes whole task lifetimes, so the
+# detached pump task (alive with in-flight imports across export calls)
+# deadlocks every later export call; relaxing that gate exposes deeper
+# task-interleave races (lann/jco#11, fix attempts in lann/jco PR #27).
+# Two JS drivers are ready for when it works: run-endpoint.mjs (the
+# surface driven directly) and run-endpoint-demo.mjs (the composed
+# artifact the wasmtime rows run).
 
 run_pair "endpoint-relay-wasmtime-wasmtime" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" -- \

@@ -4,4 +4,5 @@ node_modules
 /host-jco/generated
 /host-jco/generated-exec
 /host-jco/generated-endpoint
+/host-jco/generated-endpoint-demo
 /host-jco/build
