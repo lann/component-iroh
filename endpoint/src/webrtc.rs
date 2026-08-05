@@ -117,12 +117,17 @@ impl Drop for SessionGuard {
     }
 }
 
-/// Publish one signal to `peer` through the relay outbox.
+/// Publish one signal to `peer` through the relay outbox, addressed via
+/// the session's relay.
 fn publish(shared: &Shared, peer: [u8; 32], signal: &Signal) -> Result<(), Error> {
     let mut payload = vec![SIGNAL_PREFIX];
     serde_json::to_writer(&mut payload, signal)
         .map_err(|e| Error::Other(format!("encode signal: {e}")))?;
-    shared.borrow_mut().push_signal_outbound(peer, payload);
+    let mut st = shared.borrow_mut();
+    let relay = st
+        .signaling_relay(peer)
+        .ok_or(Error::Other("signal outside a session".into()))?;
+    st.push_signal_outbound(relay, peer, payload);
     Ok(())
 }
 
@@ -232,13 +237,13 @@ async fn consume_signaling(
     Ok(())
 }
 
-/// Background upgrade: the offerer dance for `peer`, moving the peer's
-/// route onto the channel on success. Spawned by the pump for each
-/// relay-dialed connection that carried a `webrtc` hint. Failure is
-/// silent: the connection stays on the relay, and the caller observes
-/// the path through `connection.path`.
-pub async fn upgrade(shared: Shared, peer: [u8; 32]) {
-    let Ok(wire) = dial(&shared, peer).await else {
+/// Background upgrade: the offerer dance for `peer` through pool relay
+/// `via`, moving the peer's route onto the channel on success. Spawned
+/// by the pump for each relay-dialed connection that carried a `webrtc`
+/// hint. Failure is silent: the connection stays on the relay, and the
+/// caller observes the path through `connection.path`.
+pub async fn upgrade(shared: Shared, peer: [u8; 32], via: u32) {
+    let Ok(wire) = dial(&shared, peer, via).await else {
         return;
     };
     let _ = shared.borrow_mut().register_channel(peer, wire);
@@ -246,8 +251,8 @@ pub async fn upgrade(shared: Shared, peer: [u8; 32]) {
 
 /// Dial `peer` over WebRTC: the offerer's dance, resolving once the
 /// channel is `open` and QUIC may flow.
-async fn dial(shared: &Shared, peer: [u8; 32]) -> Result<Rc<ChannelWire>, Error> {
-    shared.borrow_mut().begin_signaling(peer)?;
+async fn dial(shared: &Shared, peer: [u8; 32], via: u32) -> Result<Rc<ChannelWire>, Error> {
+    shared.borrow_mut().begin_signaling(peer, via)?;
     let _guard = SessionGuard {
         shared: shared.clone(),
         peer,

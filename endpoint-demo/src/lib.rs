@@ -75,14 +75,18 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
         .as_ref()
         .map(|a| a.as_bytes().to_vec())
         .unwrap_or_else(|| ALPN.to_vec());
+    let peer_relay = config
+        .peer_relay
+        .clone()
+        .unwrap_or_else(|| config.relay_url.clone());
     let mut addrs = Vec::new();
     if let Some(direct) = &config.direct {
         addrs.push(TransportAddr::Ip(direct.clone()));
     }
     if config.webrtc {
-        addrs.push(TransportAddr::Webrtc(config.relay_url.clone()));
+        addrs.push(TransportAddr::Webrtc(peer_relay.clone()));
     }
-    addrs.push(TransportAddr::Relay(config.relay_url.clone()));
+    addrs.push(TransportAddr::Relay(peer_relay.clone()));
     let started = Instant::now();
     let conn = endpoint
         .connect(

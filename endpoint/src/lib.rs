@@ -10,13 +10,14 @@
 //! state directly and kick the pump to flush the consequences.
 //!
 //! v0 narrowings (each a recorded latitude, not a design ruling): the
-//! dial path is `ip` (with a bound socket) or the relay — no racing or
-//! fallback between them; a `webrtc` entry upgrades a relay-dialed
-//! connection in the background (flip on channel open, flip back on
-//! channel death — no quality-based selection); `custom` entries are
-//! ignored; one signaling session per peer at a time; one relay per
-//! endpoint (a peer on a different relay fails `connect-failed`, for
-//! dialing and for signaling); and `bind` requires a relay URL.
+//! dial path is `ip` (with a bound socket) or a relay — the entry's
+//! foreign relay joins a pool on demand, the home relay otherwise; no
+//! racing or fallback between dial paths; a `webrtc` entry upgrades a
+//! relay-dialed connection in the background (flip on channel open,
+//! flip back on channel death — no quality-based selection); `custom`
+//! entries are ignored; one signaling session per peer at a time; a
+//! foreign relay's death starves its routes rather than failing them;
+//! and `bind` requires a home relay URL.
 
 mod endpoint_impl;
 mod relay;

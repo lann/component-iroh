@@ -82,7 +82,7 @@ pub(crate) struct State {
     addr_to_peer: HashMap<SocketAddr, [u8; 32]>,
     next_host: u32,
     accept_queue: VecDeque<ConnectionHandle>,
-    relay_outbound: VecDeque<([u8; 32], Vec<u8>)>,
+    relay_outbound: VecDeque<(u32, [u8; 32], Vec<u8>)>,
     udp_outbound: VecDeque<(SocketAddr, Vec<u8>)>,
     /// Transmits bound for WebRTC channels, keyed by channel id.
     channel_outbound: VecDeque<(u32, Vec<u8>)>,
@@ -90,15 +90,30 @@ pub(crate) struct State {
     /// Transmits to an address with no entry go to the UDP socket
     /// (real addresses are never in this map).
     routes: HashMap<SocketAddr, RouteWire>,
+    /// The relay pool: the home relay (key `HOME_RELAY`) plus foreign
+    /// relays opened for dialing or signaling, keyed by their
+    /// normalized URL in `relay_keys`. A dead foreign relay leaves the
+    /// pool; routes naming it drop transmits until their connections
+    /// idle out.
+    relay_pool: HashMap<u32, Rc<RelayConn>>,
+    relay_keys: HashMap<String, u32>,
+    /// URLs an in-flight `connect` is currently opening; a second
+    /// dialer waits for the first instead of opening twice.
+    relay_opening: HashSet<String>,
+    /// Relays registered since the pump last armed receives.
+    new_relays: Vec<(u32, Rc<RelayConn>)>,
+    next_relay_key: u32,
     /// Peers whose relay-dialed connections asked for a WebRTC
-    /// upgrade; the pump spawns one offerer session per entry.
-    pending_upgrades: Vec<[u8; 32]>,
+    /// upgrade, with the relay to signal through; the pump spawns one
+    /// offerer session per entry.
+    pending_upgrades: Vec<([u8; 32], u32)>,
     /// Whether this endpoint dials `webrtc` entries and answers
     /// inbound signaling (`endpoint-options.webrtc`).
     webrtc_enabled: bool,
-    /// Peers with an active signaling session (offerer or answerer);
-    /// one session per peer at a time.
-    signaling: HashSet<[u8; 32]>,
+    /// Peers with an active signaling session (offerer or answerer),
+    /// mapped to the relay the session signals through; one session
+    /// per peer at a time.
+    signaling: HashMap<[u8; 32], u32>,
     /// Inbound signaling payloads (the JSON after the prefix byte),
     /// keyed by the relay-authenticated source. Sessions poll these.
     signal_inboxes: HashMap<[u8; 32], VecDeque<Vec<u8>>>,
@@ -117,15 +132,24 @@ pub(crate) struct State {
 /// The wire behind one synthetic peer address.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RouteWire {
-    Relay,
+    /// A relay from the pool, by key.
+    Relay(u32),
     Channel(u32),
 }
+
+/// The home relay's pool key; its death kills the endpoint, where a
+/// foreign relay's death only starves the routes that named it.
+const HOME_RELAY: u32 = 0;
 
 struct ChannelEntry {
     wire: Rc<ChannelWire>,
     /// The relay-authenticated peer the channel was signaled with;
     /// connections accepted over it must authenticate as this identity.
     peer: [u8; 32],
+    /// The relay the channel was signaled through — where the peer is
+    /// provably reachable, and where its route returns if the channel
+    /// dies.
+    fallback_relay: u32,
 }
 
 struct ConnEntry {
@@ -177,9 +201,14 @@ impl State {
             udp_outbound: VecDeque::new(),
             channel_outbound: VecDeque::new(),
             routes: HashMap::new(),
+            relay_pool: HashMap::new(),
+            relay_keys: HashMap::new(),
+            relay_opening: HashSet::new(),
+            new_relays: Vec::new(),
+            next_relay_key: 0,
             pending_upgrades: Vec::new(),
             webrtc_enabled,
-            signaling: HashSet::new(),
+            signaling: HashMap::new(),
             signal_inboxes: HashMap::new(),
             channels: HashMap::new(),
             new_channels: Vec::new(),
@@ -195,9 +224,9 @@ impl State {
     /// distinct, stable address per peer, whichever wire carries the
     /// packets). Drawn from `2001:db8:77::/48` — the IPv6 documentation
     /// prefix is never routable, so no real peer address can collide
-    /// with a standin. A fresh standin routes to the relay until a
-    /// channel upgrade moves it.
-    fn addr_for_peer(&mut self, peer: [u8; 32]) -> SocketAddr {
+    /// with a standin. A fresh standin routes to the relay it was
+    /// first seen through (`via`) until a channel upgrade moves it.
+    fn addr_for_peer(&mut self, peer: [u8; 32], via: u32) -> SocketAddr {
         if let Some(addr) = self.peer_to_addr.get(&peer) {
             return *addr;
         }
@@ -205,8 +234,19 @@ impl State {
         let addr = doc_prefix_addr(0x77, self.next_host);
         self.peer_to_addr.insert(peer, addr);
         self.addr_to_peer.insert(addr, peer);
-        self.routes.insert(addr, RouteWire::Relay);
+        self.routes.insert(addr, RouteWire::Relay(via));
         addr
+    }
+
+    /// Add a relay connection to the pool under its normalized URL.
+    /// The first registration is the home relay (`HOME_RELAY`).
+    fn register_relay(&mut self, url: &str, conn: Rc<RelayConn>) -> u32 {
+        let key = self.next_relay_key;
+        self.next_relay_key += 1;
+        self.relay_pool.insert(key, conn.clone());
+        self.relay_keys.insert(normalize_relay_url(url), key);
+        self.new_relays.push((key, conn));
+        key
     }
 
     /// True once no operation can succeed anymore; signaling sessions
@@ -215,13 +255,15 @@ impl State {
         self.closed || self.dead.is_some()
     }
 
-    /// Claim the signaling slot for `peer`; one session at a time.
-    pub(crate) fn begin_signaling(&mut self, peer: [u8; 32]) -> Result<(), Error> {
-        if !self.signaling.insert(peer) {
+    /// Claim the signaling slot for `peer`, recording the relay the
+    /// session signals through; one session at a time.
+    pub(crate) fn begin_signaling(&mut self, peer: [u8; 32], relay: u32) -> Result<(), Error> {
+        if self.signaling.contains_key(&peer) {
             return Err(Error::ConnectFailed(
                 "a webrtc signaling session with this peer is already active".into(),
             ));
         }
+        self.signaling.insert(peer, relay);
         Ok(())
     }
 
@@ -231,9 +273,15 @@ impl State {
         self.signal_inboxes.remove(&peer);
     }
 
-    /// Queue one signaling payload for the pump to relay to `peer`.
-    pub(crate) fn push_signal_outbound(&mut self, peer: [u8; 32], payload: Vec<u8>) {
-        self.relay_outbound.push_back((peer, payload));
+    /// The relay `peer`'s active signaling session speaks through.
+    pub(crate) fn signaling_relay(&self, peer: [u8; 32]) -> Option<u32> {
+        self.signaling.get(&peer).copied()
+    }
+
+    /// Queue one signaling payload for the pump to relay to `peer`
+    /// through the session's relay.
+    pub(crate) fn push_signal_outbound(&mut self, relay: u32, peer: [u8; 32], payload: Vec<u8>) {
+        self.relay_outbound.push_back((relay, peer, payload));
     }
 
     /// The next signaling payload from `peer`, if any.
@@ -254,6 +302,7 @@ impl State {
             wire.close();
             return Err(Error::Closed);
         }
+        let fallback_relay = self.signaling_relay(peer).unwrap_or(HOME_RELAY);
         self.next_channel_id += 1;
         let id = self.next_channel_id;
         self.channels.insert(
@@ -261,23 +310,26 @@ impl State {
             ChannelEntry {
                 wire: wire.clone(),
                 peer,
+                fallback_relay,
             },
         );
         self.new_channels.push((id, wire));
-        let synthetic = self.addr_for_peer(peer);
+        let synthetic = self.addr_for_peer(peer, fallback_relay);
         self.routes.insert(synthetic, RouteWire::Channel(id));
         Ok(())
     }
 
     /// Retire a dead channel; a peer routed over it moves back to the
-    /// relay (its connections survive the move or idle out).
+    /// relay it was signaled through (its connections survive the move
+    /// or idle out).
     fn retire_channel(&mut self, id: u32) {
         let Some(entry) = self.channels.remove(&id) else {
             return;
         };
         if let Some(synthetic) = self.peer_to_addr.get(&entry.peer) {
             if self.routes.get(synthetic) == Some(&RouteWire::Channel(id)) {
-                self.routes.insert(*synthetic, RouteWire::Relay);
+                self.routes
+                    .insert(*synthetic, RouteWire::Relay(entry.fallback_relay));
             }
         }
     }
@@ -333,9 +385,9 @@ impl State {
                             // addresses have no route entry and go to
                             // the UDP socket.
                             match routes.get(&transmit.destination) {
-                                Some(RouteWire::Relay) => {
+                                Some(RouteWire::Relay(key)) => {
                                     let peer = addr_to_peer[&transmit.destination];
-                                    relay_outbound.push_back((peer, datagram));
+                                    relay_outbound.push_back((*key, peer, datagram));
                                 }
                                 Some(RouteWire::Channel(id)) => {
                                     channel_outbound.push_back((*id, datagram));
@@ -359,8 +411,8 @@ impl State {
         }
     }
 
-    fn handle_relay_datagram(&mut self, source: [u8; 32], payload: Vec<u8>) {
-        let addr = self.addr_for_peer(source);
+    fn handle_relay_datagram(&mut self, via: u32, source: [u8; 32], payload: Vec<u8>) {
+        let addr = self.addr_for_peer(source, via);
         self.handle_datagram(addr, Some(source), payload);
     }
 
@@ -373,10 +425,14 @@ impl State {
     /// connection sees one unbroken path — attributed to the
     /// signaling-authenticated peer.
     fn handle_channel_datagram(&mut self, id: u32, payload: Vec<u8>) {
-        let Some(peer) = self.channels.get(&id).map(|entry| entry.peer) else {
+        let Some((peer, via)) = self
+            .channels
+            .get(&id)
+            .map(|entry| (entry.peer, entry.fallback_relay))
+        else {
             return;
         };
-        let synthetic = self.addr_for_peer(peer);
+        let synthetic = self.addr_for_peer(peer, via);
         self.handle_datagram(synthetic, Some(peer), payload);
     }
 
@@ -420,10 +476,19 @@ impl State {
         }
     }
 
+    /// Send an endpoint-level response (version negotiation, retry,
+    /// close) back where the datagram came from, by the standin's
+    /// current route — real addresses go to the UDP socket.
     fn push_response(&mut self, addr: SocketAddr, source: Option<[u8; 32]>, payload: &[u8]) {
-        match source {
-            Some(peer) => self.relay_outbound.push_back((peer, payload.to_vec())),
-            None => self.udp_outbound.push_back((addr, payload.to_vec())),
+        match (self.routes.get(&addr), source) {
+            (Some(RouteWire::Relay(key)), Some(peer)) => {
+                self.relay_outbound
+                    .push_back((*key, peer, payload.to_vec()));
+            }
+            (Some(RouteWire::Channel(id)), _) => {
+                self.channel_outbound.push_back((*id, payload.to_vec()));
+            }
+            _ => self.udp_outbound.push_back((addr, payload.to_vec())),
         }
     }
 
@@ -532,21 +597,28 @@ fn on_event(
 /// one — see the spike's teardown discipline). Channel receives live in a
 /// persistent set with the same discipline: closing every channel
 /// resolves them before the task returns.
-async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
-    let mut recv = pin!(relay.recv_datagram().fuse());
+async fn pump(shared: Shared, udp: Option<Rc<UdpWire>>) {
     let mut udp_recv = pin!(udp_receive(udp.clone()).fuse());
     let mut tick = pin!(monotonic_clock::wait_for(TICK_NS).fuse());
     let mut channel_recvs: FuturesUnordered<ChannelRecvFuture> = FuturesUnordered::new();
+    let mut relay_recvs: FuturesUnordered<RelayRecvFuture> = FuturesUnordered::new();
 
     'pump: loop {
         shared.borrow_mut().drain();
         loop {
             let item = shared.borrow_mut().relay_outbound.pop_front();
             match item {
-                Some((peer, datagram)) => {
-                    if relay.send_datagram(&peer, &datagram).await.is_err() {
-                        shared.borrow_mut().mark_dead("relay send failed");
-                        break 'pump;
+                Some((key, peer, datagram)) => {
+                    let conn = shared.borrow().relay_pool.get(&key).cloned();
+                    // A retired relay's queued transmits are lost, as is
+                    // a failed foreign send; the home relay's failure is
+                    // the endpoint's death.
+                    if let Some(conn) = conn {
+                        if conn.send_datagram(&peer, &datagram).await.is_err() && key == HOME_RELAY
+                        {
+                            shared.borrow_mut().mark_dead("relay send failed");
+                            break 'pump;
+                        }
                     }
                 }
                 None => break,
@@ -583,16 +655,20 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
             }
         }
 
-        // Arm receives for channels registered since the last turn, and
-        // spawn offerer sessions for requested upgrades.
+        // Arm receives for relays and channels registered since the
+        // last turn, and spawn offerer sessions for requested upgrades.
         {
+            let new_relays = std::mem::take(&mut shared.borrow_mut().new_relays);
+            for (key, conn) in new_relays {
+                relay_recvs.push(Box::pin(relay_receive(key, conn)));
+            }
             let new_channels = std::mem::take(&mut shared.borrow_mut().new_channels);
             for (id, wire) in new_channels {
                 channel_recvs.push(Box::pin(channel_receive(id, wire)));
             }
             let upgrades = std::mem::take(&mut shared.borrow_mut().pending_upgrades);
-            for peer in upgrades {
-                wit_bindgen::spawn_local(webrtc::upgrade(shared.clone(), peer));
+            for (peer, relay) in upgrades {
+                wit_bindgen::spawn_local(webrtc::upgrade(shared.clone(), peer, relay));
             }
         }
 
@@ -614,20 +690,33 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
         }
 
         select_biased! {
-            received = recv => match received {
-                Ok(datagram) => {
-                    recv.set(relay.recv_datagram().fuse());
-                    if datagram.payload.first() == Some(&SIGNAL_PREFIX) {
-                        handle_signal(&shared, datagram.source, &datagram.payload[1..]);
-                    } else {
-                        shared
-                            .borrow_mut()
-                            .handle_relay_datagram(datagram.source, datagram.payload);
+            event = next_relay_event(&mut relay_recvs).fuse() => {
+                let (key, result) = event;
+                match result {
+                    Ok(datagram) => {
+                        // Re-arm before handling so the wire keeps
+                        // flowing; a retired relay stays retired.
+                        let conn = shared.borrow().relay_pool.get(&key).cloned();
+                        if let Some(conn) = conn {
+                            relay_recvs.push(Box::pin(relay_receive(key, conn)));
+                        }
+                        if datagram.payload.first() == Some(&SIGNAL_PREFIX) {
+                            handle_signal(&shared, key, datagram.source, &datagram.payload[1..]);
+                        } else {
+                            shared
+                                .borrow_mut()
+                                .handle_relay_datagram(key, datagram.source, datagram.payload);
+                        }
                     }
-                }
-                Err(err) => {
-                    shared.borrow_mut().mark_dead(&err);
-                    break 'pump;
+                    Err(err) => {
+                        if key == HOME_RELAY {
+                            shared.borrow_mut().mark_dead(&err);
+                            break 'pump;
+                        }
+                        // A foreign relay died; routes naming it starve
+                        // and their connections idle out.
+                        shared.borrow_mut().relay_pool.remove(&key);
+                    }
                 }
             },
             received = udp_recv => {
@@ -675,12 +764,15 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
         }
     }
 
-    // Resolve the pinned imports before the task ends: close the relay
-    // (its pending receive resolves with the closed error), self-wake the
-    // UDP socket (a zero-length datagram to our own address resolves its
-    // pending receive), close every channel (each pending receive
-    // resolves with the closed error), and let the final tick fire.
-    relay.close();
+    // Resolve the pinned imports before the task ends: close every pool
+    // relay and every channel (each pending receive resolves with its
+    // closed error), self-wake the UDP socket (a zero-length datagram
+    // to our own address resolves its pending receive), and let the
+    // final tick fire.
+    let relays: Vec<Rc<RelayConn>> = shared.borrow().relay_pool.values().cloned().collect();
+    for conn in &relays {
+        conn.close();
+    }
     if let Some(wire) = &udp {
         let _ = wire.self_wake().await;
     }
@@ -693,15 +785,8 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
     for wire in &channel_wires {
         wire.close();
     }
-    while !recv.is_terminated() {
-        select_biased! {
-            received = recv => if received.is_ok() {
-                recv.set(relay.recv_datagram().fuse());
-            },
-            _ = udp_recv => {}
-            _ = next_channel_event(&mut channel_recvs).fuse() => {}
-            _ = tick => tick.set(monotonic_clock::wait_for(TICK_NS).fuse()),
-        }
+    while !relay_recvs.is_empty() {
+        let _ = relay_recvs.next().await;
     }
     if udp.is_some() && !udp_recv.is_terminated() {
         udp_recv.as_mut().await.ok();
@@ -711,6 +796,42 @@ async fn pump(shared: Shared, relay: Rc<RelayConn>, udp: Option<Rc<UdpWire>>) {
     }
     if !tick.is_terminated() {
         tick.as_mut().await;
+    }
+}
+
+type RelayRecvFuture = futures::future::LocalBoxFuture<
+    'static,
+    (
+        u32,
+        Result<iroh_endpoint_core::relay_frames::Datagram, String>,
+    ),
+>;
+
+/// One relay receive, tagged with the relay's pool key.
+async fn relay_receive(
+    key: u32,
+    conn: Rc<RelayConn>,
+) -> (
+    u32,
+    Result<iroh_endpoint_core::relay_frames::Datagram, String>,
+) {
+    let result = conn.recv_datagram().await;
+    (key, result)
+}
+
+/// The next completed relay receive, or pending-forever while the pool
+/// is empty (only during teardown; the home relay is armed before the
+/// first select). The set owns the in-flight import futures.
+async fn next_relay_event(
+    set: &mut FuturesUnordered<RelayRecvFuture>,
+) -> (
+    u32,
+    Result<iroh_endpoint_core::relay_frames::Datagram, String>,
+) {
+    if set.is_empty() {
+        std::future::pending().await
+    } else {
+        set.next().await.expect("a non-empty set yields an item")
     }
 }
 
@@ -740,7 +861,7 @@ async fn next_channel_event(
 /// Inbound signaling: file the payload in the peer's inbox, spawning an
 /// answerer session for a peer without one. Discarded entirely when the
 /// WebRTC wire is disabled or the endpoint is closing.
-fn handle_signal(shared: &Shared, source: [u8; 32], payload: &[u8]) {
+fn handle_signal(shared: &Shared, via: u32, source: [u8; 32], payload: &[u8]) {
     /// Unread-signal cap per peer; a flooding peer loses signals, not us.
     const INBOX_CAP: usize = 64;
     let spawn_answerer = {
@@ -749,8 +870,12 @@ fn handle_signal(shared: &Shared, source: [u8; 32], payload: &[u8]) {
             return;
         }
         // Claim the slot synchronously with the decision, so a second
-        // datagram cannot spawn a second session.
-        let spawn_answerer = st.signaling.insert(source);
+        // datagram cannot spawn a second session. The session answers
+        // through the relay the offer arrived on.
+        let spawn_answerer = !st.signaling.contains_key(&source);
+        if spawn_answerer {
+            st.signaling.insert(source, via);
+        }
         let inbox = st.signal_inboxes.entry(source).or_default();
         if inbox.len() < INBOX_CAP {
             inbox.push_back(payload.to_vec());
@@ -797,6 +922,11 @@ fn doc_prefix_addr(space: u16, host: u32) -> SocketAddr {
     )
 }
 
+/// The pool-key identity of a relay URL: trailing-slash-insensitive.
+fn normalize_relay_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}
+
 /// Poll `check` against the shared state until it produces a value,
 /// sleeping one quantum between attempts. Each sleep is a clock import
 /// awaited to completion — never cancelled mid-flight.
@@ -814,7 +944,6 @@ async fn wait_until<R>(shared: &Shared, mut check: impl FnMut(&mut State) -> Opt
 pub struct EndpointRes {
     shared: Shared,
     identity: Rc<Identity>,
-    relay_url: String,
     udp: Option<Rc<UdpWire>>,
 }
 
@@ -852,6 +981,53 @@ impl Guest for Component {
     type Connection = ConnectionRes;
     type SendStream = SendStreamRes;
     type RecvStream = RecvStreamRes;
+}
+
+impl EndpointRes {
+    /// The pool key for `url`, opening a connection to the relay when
+    /// none exists. Concurrent dials to the same relay share one open:
+    /// the first claims the slot, the rest wait for its outcome.
+    async fn ensure_relay(&self, url: &str) -> Result<u32, Error> {
+        let normalized = normalize_relay_url(url);
+        let claimed = {
+            let mut st = self.shared.borrow_mut();
+            if let Some(key) = st.relay_keys.get(&normalized) {
+                return Ok(*key);
+            }
+            if st.is_closed_or_dead() {
+                return Err(Error::Closed);
+            }
+            st.relay_opening.insert(normalized.clone())
+        };
+        if claimed {
+            let opened = RelayConn::connect(url, &self.identity).await;
+            let mut st = self.shared.borrow_mut();
+            st.relay_opening.remove(&normalized);
+            return match opened {
+                Ok(conn) => Ok(st.register_relay(url, Rc::new(conn))),
+                Err(e) => Err(Error::ConnectFailed(format!("relay {url}: {e}"))),
+            };
+        }
+        let started = Instant::now();
+        wait_until(&self.shared, move |st| {
+            if let Some(key) = st.relay_keys.get(&normalized) {
+                return Some(Ok(*key));
+            }
+            if !st.relay_opening.contains(&normalized) {
+                return Some(Err(Error::ConnectFailed(
+                    "a concurrent open of this relay failed".into(),
+                )));
+            }
+            if st.is_closed_or_dead() {
+                return Some(Err(Error::Closed));
+            }
+            if started.elapsed() > Duration::from_secs(30) {
+                return Some(Err(Error::ConnectFailed("relay open timed out".into())));
+            }
+            None
+        })
+        .await
+    }
 }
 
 impl GuestEndpoint for EndpointRes {
@@ -898,12 +1074,16 @@ impl GuestEndpoint for EndpointRes {
         };
 
         let shared = Rc::new(RefCell::new(State::new(quinn, options.webrtc)));
-        wit_bindgen::spawn_local(pump(shared.clone(), Rc::new(relay), udp.clone()));
+        // The home relay takes pool key HOME_RELAY; the pump arms its
+        // receive on the first turn.
+        shared
+            .borrow_mut()
+            .register_relay(&relay_url, Rc::new(relay));
+        wit_bindgen::spawn_local(pump(shared.clone(), udp.clone()));
 
         Ok(Endpoint::new(EndpointRes {
             shared,
             identity: Rc::new(identity),
-            relay_url,
             udp,
         }))
     }
@@ -923,19 +1103,21 @@ impl GuestEndpoint for EndpointRes {
             .try_into()
             .map_err(|_| Error::InvalidArgument("endpoint id is not 32 bytes".into()))?;
         // The dial path: the first parseable `ip` entry when a socket
-        // is bound, the relay otherwise — no racing or fallback. A
-        // `webrtc` entry is an upgrade hint: the connection starts on
-        // the relay and moves to the channel when it opens.
+        // is bound, otherwise a relay — the entry's relay when one
+        // names a foreign server (opened into the pool on demand), the
+        // home relay when none does. No racing or fallback. A `webrtc`
+        // entry is an upgrade hint: the connection starts on the relay
+        // and moves to the channel when it opens, signaled through the
+        // entry's relay.
         let webrtc_enabled = self.shared.borrow().webrtc_enabled;
         let mut direct: Option<SocketAddr> = None;
-        let mut webrtc_hint = false;
+        let mut dial_relay: Option<String> = None;
+        let mut webrtc_hint: Option<String> = None;
         for entry in &addr.addrs {
             match entry {
                 TransportAddr::Relay(url) => {
-                    if url.trim_end_matches('/') != self.relay_url.trim_end_matches('/') {
-                        return Err(Error::ConnectFailed(
-                            "cross-relay dialing is not implemented yet".into(),
-                        ));
+                    if dial_relay.is_none() {
+                        dial_relay = Some(url.clone());
                     }
                 }
                 TransportAddr::Ip(text) => {
@@ -944,18 +1126,25 @@ impl GuestEndpoint for EndpointRes {
                     }
                 }
                 TransportAddr::Webrtc(url) if webrtc_enabled => {
-                    if url.trim_end_matches('/') != self.relay_url.trim_end_matches('/') {
-                        return Err(Error::ConnectFailed(
-                            "webrtc signaling through a foreign relay is not implemented yet"
-                                .into(),
-                        ));
+                    if webrtc_hint.is_none() {
+                        webrtc_hint = Some(url.clone());
                     }
-                    webrtc_hint = true;
                 }
                 TransportAddr::Webrtc(_) => {}
                 TransportAddr::Custom(_) => {}
             }
         }
+
+        // Resolve pool keys before quinn dials; opening a foreign relay
+        // awaits its websocket and relay handshake.
+        let dial_key = match (&direct, &dial_relay) {
+            (None, Some(url)) => self.ensure_relay(url).await?,
+            _ => HOME_RELAY,
+        };
+        let upgrade_key = match (&direct, &webrtc_hint) {
+            (None, Some(url)) => Some(self.ensure_relay(url).await?),
+            _ => None,
+        };
 
         let tls_config = tls::client_config(&self.identity, peer, vec![alpn]).map_err(other)?;
         let quic_tls = QuicClientConfig::try_from(Arc::new(tls_config))
@@ -970,7 +1159,16 @@ impl GuestEndpoint for EndpointRes {
             }
             let remote = match direct {
                 Some(real) => real,
-                None => st.addr_for_peer(peer),
+                None => {
+                    let standin = st.addr_for_peer(peer, dial_key);
+                    // An explicit dial names where the peer is now; a
+                    // standin still routed to some relay follows it (a
+                    // channel route is a better wire and stays).
+                    if matches!(st.routes.get(&standin), Some(RouteWire::Relay(_))) {
+                        st.routes.insert(standin, RouteWire::Relay(dial_key));
+                    }
+                    standin
+                }
             };
             let (handle, conn) = st
                 .quinn
@@ -980,8 +1178,8 @@ impl GuestEndpoint for EndpointRes {
                 .insert(handle, ConnEntry::new(conn, Some(peer), false));
             // The upgrade dance overlaps the handshake; the route flip
             // is invisible to quinn (same standin address).
-            if webrtc_hint && direct.is_none() {
-                st.pending_upgrades.push(peer);
+            if let Some(key) = upgrade_key {
+                st.pending_upgrades.push((peer, key));
             }
             handle
         };
@@ -1111,7 +1309,7 @@ impl GuestConnection for ConnectionRes {
         };
         match st.routes.get(&entry.conn.remote_address()) {
             Some(RouteWire::Channel(_)) => PathKind::Webrtc,
-            Some(RouteWire::Relay) => PathKind::Relay,
+            Some(RouteWire::Relay(_)) => PathKind::Relay,
             // Real addresses are never in the route table.
             None => PathKind::Ip,
         }

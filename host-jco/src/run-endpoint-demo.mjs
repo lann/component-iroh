@@ -20,6 +20,7 @@ const { values } = parseArgs({
     "udp-bind": { type: "string" },
     direct: { type: "string" },
     webrtc: { type: "boolean", default: false },
+    "peer-relay": { type: "string" },
     message: { type: "string", default: "hello through the endpoint surface" },
   },
 });
@@ -42,6 +43,7 @@ async function main() {
     udpBind: values["udp-bind"],
     direct: values.direct,
     webrtc: values.webrtc,
+    peerRelay: values["peer-relay"],
     message,
   });
 

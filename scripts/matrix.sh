@@ -9,6 +9,9 @@ cd "$(dirname "$0")/.."
 
 RELAY_PORT=3341
 RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
+# A second, independent relay for the cross-relay rows.
+RELAY_B_PORT=3342
+RELAY_B_URL="http://127.0.0.1:${RELAY_B_PORT}"
 SPIKE_WASM=target/wasm32-wasip2/release/iroh_spike_guest.wasm
 COMPOSED_WASM=target/components/iroh-demo.wasm
 HOST=target/release/iroh-spike-host
@@ -21,11 +24,19 @@ FAILURES=0
 
 cat > "$LOGDIR/relay.toml" <<EOF
 http_bind_addr = "127.0.0.1:${RELAY_PORT}"
+enable_metrics = false
 EOF
 .deps/iroh/target/release/iroh-relay --dev -c "$LOGDIR/relay.toml" \
     > "$LOGDIR/relay.log" 2>&1 &
 RELAY_PID=$!
-trap 'kill $RELAY_PID 2>/dev/null' EXIT
+cat > "$LOGDIR/relay-b.toml" <<EOF
+http_bind_addr = "127.0.0.1:${RELAY_B_PORT}"
+enable_metrics = false
+EOF
+.deps/iroh/target/release/iroh-relay --dev -c "$LOGDIR/relay-b.toml" \
+    > "$LOGDIR/relay-b.log" 2>&1 &
+RELAY_B_PID=$!
+trap 'kill $RELAY_PID $RELAY_B_PID 2>/dev/null' EXIT
 sleep 1
 
 # Start a server peer, scrape its endpoint id, run the client peer, and
@@ -159,6 +170,24 @@ run_pair "endpoint-webrtc-wasmtime-wasmtime" \
     env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$EHOST" "$COMPOSED_WASM" \
         --role client --relay "$RELAY_URL" --webrtc \
         --message "matrix webrtc" --peer
+
+# Cross-relay: the server homes on relay B, the client on relay A. The
+# client's addr entries name relay B, so the dial opens a pooled
+# connection to the foreign relay and QUIC flows through it.
+run_pair "endpoint-relay-cross-wasmtime-wasmtime" \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_B_URL" -- \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
+        --peer-relay "$RELAY_B_URL" --message "matrix cross-relay" --peer
+
+# Cross-relay WebRTC: signaling crosses to the peer's relay, then the
+# upgrade moves the packets off relays entirely (the client's bounded
+# wait for path=webrtc is the assertion).
+run_pair "endpoint-webrtc-cross-wasmtime-wasmtime" \
+    env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$EHOST" "$COMPOSED_WASM" \
+        --role server --relay "$RELAY_B_URL" --webrtc -- \
+    env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$EHOST" "$COMPOSED_WASM" \
+        --role client --relay "$RELAY_URL" --webrtc --peer-relay "$RELAY_B_URL" \
+        --message "matrix webrtc cross" --peer
 
 # --- upstream interop: wire-format compatibility with iroh v1 -------------
 #

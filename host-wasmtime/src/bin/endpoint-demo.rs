@@ -88,6 +88,7 @@ struct Cli {
     udp_bind: Option<String>,
     direct: Option<String>,
     webrtc: bool,
+    peer_relay: Option<String>,
     message: String,
 }
 
@@ -95,7 +96,8 @@ fn usage() -> wasmtime::Error {
     wasmtime::Error::msg(
         "usage: endpoint-demo <composed.wasm> --role <client|server> \
          --relay <relay-url> [--peer <endpoint-id-hex>] [--alpn A] \
-         [--udp-bind <ip:port>] [--direct <ip:port>] [--webrtc] [--message M]",
+         [--udp-bind <ip:port>] [--direct <ip:port>] [--webrtc] \
+         [--peer-relay <relay-url>] [--message M]",
     )
 }
 
@@ -109,6 +111,7 @@ fn parse_args() -> Result<Cli> {
     let mut udp_bind = None;
     let mut direct = None;
     let mut webrtc = false;
+    let mut peer_relay = None;
     let mut message = "hello through the endpoint surface".to_string();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(usage);
@@ -126,6 +129,7 @@ fn parse_args() -> Result<Cli> {
             "--udp-bind" => udp_bind = Some(value()?),
             "--direct" => direct = Some(value()?),
             "--webrtc" => webrtc = true,
+            "--peer-relay" => peer_relay = Some(value()?),
             "--message" => message = value()?,
             _ => return Err(usage()),
         }
@@ -139,6 +143,7 @@ fn parse_args() -> Result<Cli> {
         udp_bind,
         direct,
         webrtc,
+        peer_relay,
         message,
     })
 }
@@ -185,6 +190,7 @@ async fn main() -> Result<()> {
         udp_bind: cli.udp_bind,
         direct: cli.direct,
         webrtc: cli.webrtc,
+        peer_relay: cli.peer_relay,
         message: cli.message,
     };
     let report = store

@@ -32,6 +32,10 @@ interface demo {
         /// waits for the connection's path to reach the channel before
         /// sending, so the echo exercises the upgraded path.
         webrtc: bool,
+        /// The server peer's relay URL, when it differs from this
+        /// process's own (`relay-url` stays the home relay). The
+        /// client dials and signals through this relay.
+        peer-relay: option<string>,
         /// The application message the client sends (the server echoes it).
         message: string,
     }
