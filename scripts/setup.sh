@@ -25,7 +25,7 @@ WEBSOCKET_PIN=09c15e412584e14fd7b0c2b2568ed5ae5673d0ad
 IROH_REPO=https://github.com/n0-computer/iroh.git
 IROH_PIN=816dd70c056b813dcb5cbfb6a9a15e12d04b72b1 # v1.0.3
 TLS_REPO=https://github.com/polymorph-components/polymorph-tls.git
-TLS_PIN=466f72918dba1433e828fe3109b89376c3b4ead8
+TLS_PIN=23ceddad816f95f95e282914c8a269cb20413ce3
 # The jco fork: the P3/JSPI transpiler with the async fixes this
 # repository needs (lann/jco all-fixes plus the first two commits of
 # PR #27; the PR's concurrency fixes are excluded until the exec-model
