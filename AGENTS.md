@@ -8,10 +8,10 @@ Guidance for automated agents (and humans) working in this repository.
 as WebAssembly components — the same endpoint logic running in browsers, on
 personal devices, and on cloud providers. It is the consuming project of the
 sibling family
-([`lann:webcrypto`](https://github.com/lann/component-webcrypto),
-[`lann:webrtc-datachannels`](https://github.com/lann/component-webrtc-datachannels),
-[`lann:websocket`](https://github.com/lann/component-websocket),
-[`component-test`](https://github.com/lann/component-test)) and mirrors
+([`polymorph:webcrypto`](https://github.com/polymorph-components/polymorph-webcrypto),
+[`polymorph:webrtc-datachannels`](https://github.com/polymorph-components/polymorph-webrtc-datachannels),
+[`polymorph:websocket`](https://github.com/polymorph-components/polymorph-websocket),
+[`component-test`](https://github.com/polymorph-components/polymorph-test)) and mirrors
 their architecture and conventions — prefer clarity and correctness over
 features, and keep every deployment target behaviourally in sync
 (cross-implementation conformance is the gate once it exists). See
@@ -41,18 +41,18 @@ record (and usually an issue to resolve), not a refactor.
 - **Wire-format compatibility with upstream iroh on UDP paths** (discovery
   records, relay protocol, `n0_nat_traversal`, ALPN dispatch) is a feature,
   not an accident. A change that breaks it needs an explicit ruling.
-- **The crypto split**: `lann:webcrypto` serves identity — key generation,
+- **The crypto split**: `polymorph:webcrypto` serves identity — key generation,
   public-key export, and signing (discovery records, relay auth, the TLS
   CertificateVerify). Everything else — peer verification, key agreement,
   the key-derivation ladder, transcript hashing, and per-packet record
-  protection — runs in-guest through `lann:tls` (the #5 ruling; the
+  protection — runs in-guest through `polymorph:tls` (the #5 ruling; the
   README's crypto-split section is the authoritative statement). Do not
   move per-packet operations across the component boundary, and do not
   move identity keys into guest memory on platforms whose host can hold
   them.
 - **Sans-I/O core, injected edges.** The QUIC/endpoint core is sans-I/O;
-  transports (`wasi:sockets` UDP, `lann:webrtc-datachannels`,
-  `lann:websocket`), time, and crypto arrive through imports. No direct OS
+  transports (`wasi:sockets` UDP, `polymorph:webrtc-datachannels`,
+  `polymorph:websocket`), time, and crypto arrive through imports. No direct OS
   or engine dependencies in the core.
 - **Shared WIT packages are dependencies, defined once upstream.** Sibling
   packages come in via `wit/deps` (symlinks for any package defined in this

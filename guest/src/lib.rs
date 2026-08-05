@@ -3,7 +3,7 @@
 //!
 //! The same component drives either side of the demo: the client (WebRTC
 //! offerer, QUIC client) or the server (answerer, QUIC server). Identity
-//! and handshake asymmetrics run through `lann:webcrypto`; the QUIC packet
+//! and handshake asymmetrics run through `polymorph:webcrypto`; the QUIC packet
 //! path runs in-guest. See the repository README for the design this
 //! slices through.
 
@@ -38,13 +38,13 @@ mod demo {
 
     use serde::{Deserialize, Serialize};
 
-    use crate::bindings::exports::lann::iroh_spike::demo::{
+    use crate::bindings::exports::polymorph::iroh_spike::demo::{
         Guest, Role, RunConfig, RunReport, Transport,
     };
-    use crate::bindings::lann::webrtc_datachannels::connections::{
+    use crate::bindings::polymorph::webrtc_datachannels::connections::{
         DataChannel, DataChannelOptions, PeerConnection,
     };
-    use crate::bindings::lann::webrtc_datachannels::types::{
+    use crate::bindings::polymorph::webrtc_datachannels::types::{
         DataChannelState, IceCandidate, SdpType, SessionDescription,
     };
     use crate::endpoint;
@@ -371,7 +371,7 @@ mod demo {
             .map_err(|_| "endpoint id is not 32 bytes".to_string())
     }
 
-    fn rtc(err: crate::bindings::lann::webrtc_datachannels::types::Error) -> String {
+    fn rtc(err: crate::bindings::polymorph::webrtc_datachannels::types::Error) -> String {
         format!("webrtc: {err:?}")
     }
 

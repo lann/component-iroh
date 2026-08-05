@@ -4,11 +4,11 @@ A portable implementation of [iroh](https://iroh.computer) as WebAssembly
 components: the same endpoint logic running in browsers, on personal
 devices, and on cloud providers, interconnecting wasm components across
 all three — built on the
-[`lann:webcrypto`](https://github.com/lann/component-webcrypto),
-[`lann:webrtc-datachannels`](https://github.com/lann/component-webrtc-datachannels),
-and [`lann:websocket`](https://github.com/lann/component-websocket)
+[`polymorph:webcrypto`](https://github.com/polymorph-components/polymorph-webcrypto),
+[`polymorph:webrtc-datachannels`](https://github.com/polymorph-components/polymorph-webrtc-datachannels),
+and [`polymorph:websocket`](https://github.com/polymorph-components/polymorph-websocket)
 packages and the
-[`component-test`](https://github.com/lann/component-test) machinery.
+[`component-test`](https://github.com/polymorph-components/polymorph-test) machinery.
 
 Status: **proposal**. This README records the design research and the
 rulings it produced; open questions are tracked in the
@@ -59,8 +59,8 @@ nodes on UDP paths.
 | Path | Transport | Who serves it |
 | --- | --- | --- |
 | native ↔ native | UDP datagrams | `wasi:sockets`; hole punching via iroh's `n0_nat_traversal` inside the QUIC connection |
-| browser ↔ anything, direct | WebRTC data channel (unreliable, unordered — a datagram carrier) | `lann:webrtc-datachannels`: browser host in the browser, Wasmtime host (webrtc-rs) on native peers, in-guest sans-I/O stack elsewhere; ICE does the hole punching on this path |
-| any ↔ relay | WebSocket to the home relay | `lann:websocket` (the package created for this gap: `wasi:http` has no upgrade path) |
+| browser ↔ anything, direct | WebRTC data channel (unreliable, unordered — a datagram carrier) | `polymorph:webrtc-datachannels`: browser host in the browser, Wasmtime host (webrtc-rs) on native peers, in-guest sans-I/O stack elsewhere; ICE does the hole punching on this path |
+| any ↔ relay | WebSocket to the home relay | `polymorph:websocket` (the package created for this gap: `wasi:http` has no upgrade path) |
 | discovery | HTTPS (publish + resolve signed records) | `wasi:http`; Mainline DHT lookup is native-only and optional (needs UDP) |
 
 **QUIC runs end-to-end on every path.** This is the central design ruling.
@@ -77,11 +77,11 @@ Upstream iroh nodes remain reachable over plain UDP/QUIC; the WebRTC
 transport extends reach beyond what upstream's browser story (relay-only
 over WebSocket, no direct connections) can do.
 
-### The crypto split: `lann:webcrypto` for identity, `lann:tls` in-guest
+### The crypto split: `polymorph:webcrypto` for identity, `polymorph:tls` in-guest
 
-`lann:webcrypto` serves **identity**; everything else runs **in-guest**
-under the [`lann:tls`](https://github.com/lann/component-tls) sibling's
-wasm timing-class profile (its `lann-tls-quinn` crate — ChaCha20-Poly1305
+`polymorph:webcrypto` serves **identity**; everything else runs **in-guest**
+under the [`polymorph:tls`](https://github.com/polymorph-components/polymorph-tls) sibling's
+wasm timing-class profile (its `polymorph-tls-quinn` crate — ChaCha20-Poly1305
 preferred, fixsliced AES-128-GCM for conformance, RFC 9001 packet
 protection, quinn session glue). Specifically:
 
@@ -91,14 +91,14 @@ protection, quinn session glue). Specifically:
   browser-resident key — a strictly better posture than upstream
   iroh-in-wasm holding the seed in linear memory. This is TLS 1.3's one
   class-D-shaped surface (the endpoint's own CertificateVerify), and
-  delegation closes it exactly as the `lann:tls` profile prescribes.
+  delegation closes it exactly as the `polymorph:tls` profile prescribes.
 - Key exchange (class B, per-connection blast radius), handshake
   verification (secret-free), the key schedule, and per-packet record
   protection (AEAD + header protection) run in-guest. Per-packet
   operations across a component boundary were never viable (an async
   `crypto.subtle` round trip per packet, and header protection wants raw
   AES-ECB single-block, which WebCrypto does not offer); the handshake
-  asymmetrics moved in-guest when `lann:tls` landed, because each
+  asymmetrics moved in-guest when `polymorph:tls` landed, because each
   boundary crossing is the dominant browser-path handshake cost (measured
   in issue #4) and the profile's timing classification covers them. The
   original all-through-webcrypto handshake remains reconstructible by
@@ -108,9 +108,9 @@ protection, quinn session glue). Specifically:
 
 The family's standing triangle, applied to a whole endpoint:
 
-- **Browser**: jco-transpiled, `lann:webcrypto` and
-  `lann:webrtc-datachannels` served by the browser hosts over Web Crypto
-  and `RTCPeerConnection`, `lann:websocket` over the browser `WebSocket`.
+- **Browser**: jco-transpiled, `polymorph:webcrypto` and
+  `polymorph:webrtc-datachannels` served by the browser hosts over Web Crypto
+  and `RTCPeerConnection`, `polymorph:websocket` over the browser `WebSocket`.
 - **Native / cloud**: Wasmtime, the host crates
   (`add_to_linker` + view traits) over RustCrypto, webrtc-rs, and native
   sockets; UDP directly via `wasi:sockets`.
@@ -148,7 +148,7 @@ design names, a WebRTC data channel and the relay connection itself.
 - **One guest component** (`guest/`, `wasm32-wasip2`): `quinn-proto`
   with default features off, driven by a custom rustls `CryptoProvider`
   implementing the crypto split — X25519 key exchange and Ed25519
-  identity sign/verify through `lann:webcrypto` (the identity key is a
+  identity sign/verify through `polymorph:webcrypto` (the identity key is a
   non-extractable handle), while SHA-256, the HKDF key schedule, and
   AES-128-GCM record/packet protection run in-guest (RFC 9001 known
   answers under `cargo test`). rustls's synchronous callbacks bridge to
@@ -159,7 +159,7 @@ design names, a WebRTC data channel and the relay connection itself.
   *claims* an identity; the handshake authenticates it, and the two
   must agree.
 - **A stock iroh relay serves the relay leg.** Each peer opens a
-  `lann:websocket` connection to an unmodified upstream
+  `polymorph:websocket` connection to an unmodified upstream
   [`iroh-relay`](https://github.com/n0-computer/iroh/tree/main/iroh-relay)
   server and speaks iroh's relay wire protocol: the websocket subprotocol
   negotiation, the challenge-response authentication handshake (the
@@ -222,7 +222,7 @@ npm install && npm run transpile`, then `npm run start -- --role
 ### The endpoint component
 
 The designed surface (`wit/iroh.wit`, issue #3) has a first
-implementation: `endpoint/` exports `lann:iroh/endpoint@0.1.0` —
+implementation: `endpoint/` exports `polymorph:iroh/endpoint@0.1.0` —
 `bind`/`connect`/`accept` by endpoint ID, multiple connections, QUIC
 streams as resources — over three wires behind one surface: the relay
 (a pooled set, so peers on foreign relays are dialable), direct UDP

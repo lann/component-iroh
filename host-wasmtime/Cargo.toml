@@ -10,13 +10,13 @@ name = "iroh-spike-host"
 path = "src/main.rs"
 
 [dependencies]
-# The `lann:webrtc-datachannels` host implementation (a real webrtc-rs peer
+# The `polymorph:webrtc-datachannels` host implementation (a real webrtc-rs peer
 # connection behind the `connections` imports).
 wasmtime-webrtc-datachannels = { path = "../.deps/webrtc/wasmtime-impl" }
-# The `lann:webcrypto` host implementation (RustCrypto behind the crypto
+# The `polymorph:webcrypto` host implementation (RustCrypto behind the crypto
 # imports the guest's TLS layer uses).
-lann-webcrypto-wasmtime = { path = "../.deps/webcrypto/rust/wasmtime" }
-# The `lann:websocket` host implementation (tokio-tungstenite behind the
+polymorph-webcrypto-wasmtime = { path = "../.deps/webcrypto/rust/wasmtime" }
+# The `polymorph:websocket` host implementation (tokio-tungstenite behind the
 # relay connection the guest signals over).
 wasmtime-websocket = { path = "../.deps/websocket/rust/wasmtime" }
 wasmtime = { version = "47", features = ["component-model", "component-model-async", "async", "cranelift", "runtime"] }

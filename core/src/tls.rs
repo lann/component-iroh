@@ -7,13 +7,13 @@
 //! behind the presented SPKI — nothing else. The client additionally pins
 //! the server's SPKI to the endpoint ID it dialed.
 //!
-//! The mechanics live in the `lann:tls` sibling's rpk module (which
+//! The mechanics live in the `polymorph:tls` sibling's rpk module (which
 //! adopted them from this repository); this module binds them to the
 //! webcrypto-held identity: the endpoint's own signatures are delegated
 //! through the non-extractable handle, everything else is in-guest and
 //! secret-free.
 
-use lann_tls_profile::{public_key_from_ed25519_spki, RpkIdentity};
+use polymorph_tls_profile::{public_key_from_ed25519_spki, RpkIdentity};
 use rustls::Error;
 
 use crate::crypto::sign::Identity;
@@ -36,7 +36,7 @@ pub fn client_config(
     alpns: Vec<Vec<u8>>,
 ) -> Result<rustls::ClientConfig, Error> {
     let alpns: Vec<&[u8]> = alpns.iter().map(Vec::as_slice).collect();
-    lann_tls_quinn::rpk_client_config(&rpk_identity(identity)?, &expected_server, &alpns)
+    polymorph_tls_quinn::rpk_client_config(&rpk_identity(identity)?, &expected_server, &alpns)
 }
 
 /// A TLS 1.3 server config authenticating as `identity` and requiring
@@ -46,7 +46,7 @@ pub fn server_config(
     alpns: Vec<Vec<u8>>,
 ) -> Result<rustls::ServerConfig, Error> {
     let alpns: Vec<&[u8]> = alpns.iter().map(Vec::as_slice).collect();
-    lann_tls_quinn::rpk_server_config(&rpk_identity(identity)?, &alpns)
+    polymorph_tls_quinn::rpk_server_config(&rpk_identity(identity)?, &alpns)
 }
 
 fn rpk_identity(identity: &Identity) -> Result<RpkIdentity, Error> {

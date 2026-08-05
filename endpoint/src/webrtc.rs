@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bindings::lann::iroh::types::Error;
-use crate::bindings::lann::webrtc_datachannels::connections::{
+use crate::bindings::polymorph::iroh::types::Error;
+use crate::bindings::polymorph::webrtc_datachannels::connections::{
     DataChannel, DataChannelOptions, PeerConnection,
 };
-use crate::bindings::lann::webrtc_datachannels::types::{
+use crate::bindings::polymorph::webrtc_datachannels::types::{
     DataChannelState, IceCandidate, Message as ChannelMessage, SdpType, SessionDescription,
 };
 use crate::bindings::wasi::clocks::monotonic_clock;
@@ -361,6 +361,6 @@ async fn answer_inner(shared: &Shared, peer: [u8; 32]) -> Result<(), Error> {
     Ok(())
 }
 
-fn rtc(err: crate::bindings::lann::webrtc_datachannels::types::Error) -> Error {
+fn rtc(err: crate::bindings::polymorph::webrtc_datachannels::types::Error) -> Error {
     Error::ConnectFailed(format!("webrtc: {err:?}"))
 }

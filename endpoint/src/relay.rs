@@ -1,4 +1,4 @@
-//! A client connection to an iroh relay server over `lann:websocket`:
+//! A client connection to an iroh relay server over `polymorph:websocket`:
 //! connect, authenticate, then exchange relayed datagrams addressed by
 //! endpoint ID.
 //!
@@ -10,8 +10,8 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
-use crate::bindings::lann::websocket::connections::Websocket;
-use crate::bindings::lann::websocket::types::Message as WsMessage;
+use crate::bindings::polymorph::websocket::connections::Websocket;
+use crate::bindings::polymorph::websocket::types::Message as WsMessage;
 use iroh_endpoint_core::crypto::sign::Identity;
 use iroh_endpoint_core::relay_frames::{self as frames, tag};
 

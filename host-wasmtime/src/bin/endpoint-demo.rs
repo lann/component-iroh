@@ -7,7 +7,7 @@
 //! endpoint-demo <composed.wasm> --role client --relay http://127.0.0.1:3340 --peer <endpoint-id>
 //! ```
 
-use lann_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
+use polymorph_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
 use wasmtime::component::{Accessor, Component, HasData, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Result, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -29,7 +29,7 @@ mod bindings {
     });
 }
 
-use bindings::exports::lann::iroh_demo::demo::{Role as DemoRole, RunConfig};
+use bindings::exports::polymorph::iroh_demo::demo::{Role as DemoRole, RunConfig};
 
 struct Ctx {
     wasi: WasiCtx,
@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     webrtc_host::add_to_linker(&mut linker)?;
-    lann_webcrypto_wasmtime::add_to_linker(&mut linker)?;
+    polymorph_webcrypto_wasmtime::add_to_linker(&mut linker)?;
     wasmtime_websocket::add_to_linker(&mut linker)?;
 
     let mut wasi = WasiCtx::builder();
@@ -202,7 +202,9 @@ async fn main() -> Result<()> {
     };
     let report = store
         .run_concurrent(async move |accessor: &Accessor<Ctx>| {
-            demo.lann_iroh_demo_demo().call_run(accessor, config).await
+            demo.polymorph_iroh_demo_demo()
+                .call_run(accessor, config)
+                .await
         })
         .await??;
 

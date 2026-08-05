@@ -1,4 +1,4 @@
-package lann:webrtc-datachannels@0.1.0;
+package polymorph:webrtc-datachannels@0.1.0;
 
 /// Shared structural types for the WebRTC data-channel interfaces.
 ///

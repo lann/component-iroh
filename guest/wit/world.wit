@@ -1,4 +1,4 @@
-package lann:iroh-spike@0.0.1;
+package polymorph:iroh-spike@0.0.1;
 
 /// The spike's demo surface: one happy-path QUIC-over-data-channel run.
 ///
@@ -68,11 +68,11 @@ interface demo {
 }
 
 /// One demo peer: WebRTC transport and relay connectivity in, the demo run
-/// out. Signaling rides a `lann:websocket` connection to the relay server,
+/// out. Signaling rides a `polymorph:websocket` connection to the relay server,
 /// the leg both sides of the designed endpoint hold anyway.
 world iroh-spike {
-    import lann:webrtc-datachannels/connections@0.1.0;
-    import lann:websocket/connections@0.1.0;
+    import polymorph:webrtc-datachannels/connections@0.1.0;
+    import polymorph:websocket/connections@0.1.0;
     import wasi:clocks/monotonic-clock@0.3.0;
     export demo;
 }

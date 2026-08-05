@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::mpsc;
 use std::task::{Context, Poll};
 
-use lann_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
+use polymorph_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
 use wasmtime::component::{
     Accessor, Component, HasData, Linker, ResourceTable, Source, StreamConsumer, StreamReader,
     StreamResult,
@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
     let mut linker: Linker<Ctx> = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    lann_webcrypto_wasmtime::add_to_linker(&mut linker)?;
+    polymorph_webcrypto_wasmtime::add_to_linker(&mut linker)?;
 
     let mut wasi = WasiCtx::builder();
     wasi.inherit_stdio().inherit_env();
@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
 
     store
         .run_concurrent(async move |accessor: &Accessor<Ctx>| -> Result<()> {
-            let guest = probe.lann_iroh_exec_model_probe();
+            let guest = probe.polymorph_iroh_exec_model_probe();
 
             let result = guest.call_blockon_in_spawn(accessor).await?;
             print_probe("blockon-in-spawn", &result);

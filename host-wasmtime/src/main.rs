@@ -9,9 +9,9 @@
 //!     endpoint timer),
 //!   * the `connections`/`types` surface via [`wasmtime_webrtc_datachannels`]
 //!     (a real `webrtc-rs` peer connection),
-//!   * the `lann:websocket` surface via [`wasmtime_websocket`]
+//!   * the `polymorph:websocket` surface via [`wasmtime_websocket`]
 //!     (tokio-tungstenite; carries the guest's relay signaling), and
-//!   * the `lann:webcrypto` surface via [`lann_webcrypto_wasmtime`]
+//!   * the `polymorph:webcrypto` surface via [`polymorph_webcrypto_wasmtime`]
 //!     (RustCrypto).
 //!
 //! Run two instances — a server, then a client handed the server's
@@ -23,7 +23,7 @@
 //! iroh-spike-host <component.wasm> --role client --server http://127.0.0.1:3340 --peer <endpoint-id>
 //! ```
 
-use lann_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
+use polymorph_webcrypto_wasmtime::{WasiWebcryptoCtx, WasiWebcryptoCtxView, WasiWebcryptoView};
 use wasmtime::component::{Accessor, Component, HasData, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Result, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -45,7 +45,7 @@ mod bindings {
     });
 }
 
-use bindings::exports::lann::iroh_spike::demo::{
+use bindings::exports::polymorph::iroh_spike::demo::{
     Role as DemoRole, RunConfig, Transport as DemoTransport,
 };
 
@@ -188,7 +188,7 @@ async fn main() -> Result<()> {
     // Serves the guest's `wasi:clocks@0.3` timer alongside the p3 surface.
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     webrtc_host::add_to_linker(&mut linker)?;
-    lann_webcrypto_wasmtime::add_to_linker(&mut linker)?;
+    polymorph_webcrypto_wasmtime::add_to_linker(&mut linker)?;
     wasmtime_websocket::add_to_linker(&mut linker)?;
 
     let mut wasi = WasiCtx::builder();
@@ -215,7 +215,9 @@ async fn main() -> Result<()> {
     };
     let report = store
         .run_concurrent(async move |accessor: &Accessor<Ctx>| {
-            demo.lann_iroh_spike_demo().call_run(accessor, config).await
+            demo.polymorph_iroh_spike_demo()
+                .call_run(accessor, config)
+                .await
         })
         .await??;
 

@@ -1,4 +1,4 @@
-//! The endpoint demo: a plain consumer of `lann:iroh/endpoint`, composed
+//! The endpoint demo: a plain consumer of `polymorph:iroh/endpoint`, composed
 //! with the endpoint component via `wac plug`. It exercises the surface
 //! exactly the way an application protocol would: bind, connect or accept
 //! by endpoint ID, one bidirectional stream, one echo each way.
@@ -14,9 +14,9 @@ mod bindings {
     });
 }
 
-use bindings::exports::lann::iroh_demo::demo::{Guest, Role, RunConfig, RunReport};
-use bindings::lann::iroh::endpoint::{Connection, Endpoint, EndpointOptions};
-use bindings::lann::iroh::types::{EndpointAddr, Error, PathKind, TransportAddr};
+use bindings::exports::polymorph::iroh_demo::demo::{Guest, Role, RunConfig, RunReport};
+use bindings::polymorph::iroh::endpoint::{Connection, Endpoint, EndpointOptions};
+use bindings::polymorph::iroh::types::{EndpointAddr, Error, PathKind, TransportAddr};
 use bindings::wasi::clocks::monotonic_clock;
 
 /// The demo's ALPN protocol.

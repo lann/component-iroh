@@ -1,4 +1,4 @@
-package lann:iroh-exec-model@0.0.1;
+package polymorph:iroh-exec-model@0.0.1;
 
 /// Execution-model probes for the endpoint surface design: whether the
 /// synchronous webcrypto bridge works inside detached tasks, and how

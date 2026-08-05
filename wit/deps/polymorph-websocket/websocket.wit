@@ -1,4 +1,4 @@
-package lann:websocket@0.1.0;
+package polymorph:websocket@0.1.0;
 
 /// Shared structural types for the WebSocket client interfaces.
 ///

@@ -16,7 +16,7 @@ mod bindings {
     });
 }
 
-use bindings::exports::lann::iroh_exec_model::probe::Guest;
+use bindings::exports::polymorph::iroh_exec_model::probe::Guest;
 use bindings::wasi::clocks::monotonic_clock;
 use bindings::wit_stream;
 use wit_bindgen::rt::async_support::StreamReader;
@@ -28,14 +28,15 @@ static STREAM_OUTCOME: Mutex<Option<Result<String, String>>> = Mutex::new(None);
 /// drives async webcrypto imports via `block_on`.
 fn sync_webcrypto_probe() -> Result<String, String> {
     wit_bindgen::block_on(async {
-        let (_secret, public) =
-            lann_webcrypto_guest::x25519::generate_key(lann_webcrypto_guest::AgreementKeyOptions {
+        let (_secret, public) = polymorph_webcrypto_guest::x25519::generate_key(
+            polymorph_webcrypto_guest::AgreementKeyOptions {
                 derive_bits: true,
                 derive_key: false,
                 extractable: false,
-            })
-            .await
-            .map_err(|e| format!("x25519 generate: {e:?}"))?;
+            },
+        )
+        .await
+        .map_err(|e| format!("x25519 generate: {e:?}"))?;
         let raw = public
             .export_key_raw()
             .await

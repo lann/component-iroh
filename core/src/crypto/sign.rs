@@ -1,4 +1,4 @@
-//! The node identity: an Ed25519 signing key held as a `lann:webcrypto`
+//! The node identity: an Ed25519 signing key held as a `polymorph:webcrypto`
 //! handle, presented to rustls as a `SigningKey`/`Signer` pair (iroh's raw
 //! public key shape). The private key material never enters guest memory;
 //! `sign` crosses the WIT boundary per handshake, not per packet.
@@ -6,7 +6,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use lann_webcrypto_guest::{ed25519, SigningKeyOptions};
+use polymorph_webcrypto_guest::{ed25519, SigningKeyOptions};
 use rustls::pki_types::{alg_id, SubjectPublicKeyInfoDer};
 use rustls::sign::{public_key_to_spki, Signer, SigningKey};
 use rustls::{Error, SignatureAlgorithm, SignatureScheme};
@@ -64,7 +64,7 @@ impl Identity {
 }
 
 struct WebcryptoEd25519 {
-    key: Arc<lann_webcrypto_guest::SigningKey>,
+    key: Arc<polymorph_webcrypto_guest::SigningKey>,
     spki: Vec<u8>,
 }
 
@@ -90,7 +90,7 @@ impl SigningKey for WebcryptoEd25519 {
     }
 }
 
-struct WebcryptoEd25519Signer(Arc<lann_webcrypto_guest::SigningKey>);
+struct WebcryptoEd25519Signer(Arc<polymorph_webcrypto_guest::SigningKey>);
 
 impl fmt::Debug for WebcryptoEd25519Signer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

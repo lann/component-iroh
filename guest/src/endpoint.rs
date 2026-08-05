@@ -23,13 +23,13 @@ use quinn_proto::{
     EndpointConfig, Event, ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt,
 };
 
-use crate::bindings::lann::webrtc_datachannels::connections::DataChannel;
-use crate::bindings::lann::webrtc_datachannels::types::Message as ChannelMessage;
+use crate::bindings::polymorph::webrtc_datachannels::connections::DataChannel;
+use crate::bindings::polymorph::webrtc_datachannels::types::Message as ChannelMessage;
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::relay::RelayConn;
 use iroh_endpoint_core::crypto::sign::Identity;
 use iroh_endpoint_core::tls;
-use lann_tls_quinn::{QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
+use polymorph_tls_quinn::{QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 
 /// The datagram wire QUIC runs over: one datagram per binary message on
 /// either carrier.

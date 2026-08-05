@@ -16,16 +16,16 @@ WASM_TOOLS_VERSION="${WASM_TOOLS_VERSION:-1.247.0}"
 JUST_VERSION="${JUST_VERSION:-1.40.0}"
 WAC_VERSION="${WAC_VERSION:-0.10.1}"
 
-WEBRTC_REPO=https://github.com/lann/component-webrtc-datachannels.git
-WEBRTC_PIN=2f12c3136d576fd8d7d4a68f21df1c3d1a1bcf7e
-WEBCRYPTO_REPO=https://github.com/lann/component-webcrypto.git
-WEBCRYPTO_PIN=7110a990063076650d2c7cb3acde9b86d5b615da
-WEBSOCKET_REPO=https://github.com/lann/component-websocket.git
-WEBSOCKET_PIN=7b99e72f578746d74cd225d066248532d062c27b
+WEBRTC_REPO=https://github.com/polymorph-components/polymorph-webrtc-datachannels.git
+WEBRTC_PIN=d0e1a8096cdaa36c44e0ce7d06a3b75ffbe2c0c7
+WEBCRYPTO_REPO=https://github.com/polymorph-components/polymorph-webcrypto.git
+WEBCRYPTO_PIN=61fbd02c55141a1c0d76eb524e7af4bb9488fc31
+WEBSOCKET_REPO=https://github.com/polymorph-components/polymorph-websocket.git
+WEBSOCKET_PIN=09c15e412584e14fd7b0c2b2568ed5ae5673d0ad
 IROH_REPO=https://github.com/n0-computer/iroh.git
 IROH_PIN=816dd70c056b813dcb5cbfb6a9a15e12d04b72b1 # v1.0.3
-TLS_REPO=https://github.com/lann/component-tls.git
-TLS_PIN=7dd0a7b6a8750145b03eea60e3ab9902e749dcee
+TLS_REPO=https://github.com/polymorph-components/polymorph-tls.git
+TLS_PIN=466f72918dba1433e828fe3109b89376c3b4ead8
 # The jco fork: the P3/JSPI transpiler with the async fixes this
 # repository needs (lann/jco all-fixes plus the first two commits of
 # PR #27; the PR's concurrency fixes are excluded until the exec-model

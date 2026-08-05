@@ -1,5 +1,5 @@
 // Driver for one peer of the endpoint echo demo under the Node host — a
-// JavaScript application consuming the `lann:iroh/endpoint` surface
+// JavaScript application consuming the `polymorph:iroh/endpoint` surface
 // directly (the browser-consumer shape): the endpoint component is
 // transpiled alone and this script plays the role the Rust demo component
 // plays in the wac composition.

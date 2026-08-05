@@ -1,4 +1,4 @@
-//! The `lann:iroh` endpoint component: `connect`/`accept` by endpoint ID,
+//! The `polymorph:iroh` endpoint component: `connect`/`accept` by endpoint ID,
 //! QUIC end-to-end, over the iroh relay wire, direct UDP, and WebRTC
 //! data channels.
 //!

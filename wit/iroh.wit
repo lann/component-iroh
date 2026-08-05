@@ -1,4 +1,4 @@
-package lann:iroh@0.1.0;
+package polymorph:iroh@0.1.0;
 
 /// Structural types for the iroh endpoint surface.
 ///
@@ -275,13 +275,13 @@ interface endpoint {
 
 /// One iroh endpoint: transports and time in, peer connectivity out.
 ///
-/// The crypto imports (`lann:webcrypto`) are consumed by the
+/// The crypto imports (`polymorph:webcrypto`) are consumed by the
 /// implementation directly and do not appear here. The UDP direct
 /// path uses `wasi:sockets/types@0.3.0`, whose `udp-socket` resource
 /// carries the socket operations in the 0.3 draft.
 world iroh-endpoint {
-    import lann:webrtc-datachannels/connections@0.1.0;
-    import lann:websocket/connections@0.1.0;
+    import polymorph:webrtc-datachannels/connections@0.1.0;
+    import polymorph:websocket/connections@0.1.0;
     import wasi:clocks/monotonic-clock@0.3.0;
     import wasi:sockets/types@0.3.0;
     export endpoint;

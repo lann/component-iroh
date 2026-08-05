@@ -3,14 +3,14 @@ name = "iroh-endpoint"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "The lann:iroh endpoint component: connect/accept by endpoint ID over the relay wire"
+description = "The polymorph:iroh endpoint component: connect/accept by endpoint ID over the relay wire"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 iroh-endpoint-core = { path = "../core" }
-lann-tls-quinn = { path = "../.deps/tls/rust/quinn" }
+polymorph-tls-quinn = { path = "../.deps/tls/rust/quinn" }
 quinn-proto = { version = "=0.11.16", default-features = false }
 rustls = { version = "=0.23.43", default-features = false, features = ["std", "custom-provider"] }
 getrandom = "0.4"
@@ -21,4 +21,4 @@ wit-bindgen = { version = "0.59", features = ["async", "async-spawn"] }
 futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-lann-webcrypto-guest = { path = "../.deps/webcrypto/rust/guest" }
+polymorph-webcrypto-guest = { path = "../.deps/webcrypto/rust/guest" }

@@ -34,13 +34,13 @@ use quinn_proto::{
 
 use iroh_endpoint_core::crypto::sign::Identity;
 use iroh_endpoint_core::tls;
-use lann_tls_quinn::{HandshakeData, QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
+use polymorph_tls_quinn::{HandshakeData, QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 
-use crate::bindings::exports::lann::iroh::endpoint::{
+use crate::bindings::exports::polymorph::iroh::endpoint::{
     Connection, Endpoint, EndpointOptions, Guest, GuestConnection, GuestEndpoint, GuestRecvStream,
     GuestSendStream, RecvStream, SendStream,
 };
-use crate::bindings::lann::iroh::types::{
+use crate::bindings::polymorph::iroh::types::{
     ConnectionState, EndpointAddr, Error, PathKind, TransportAddr,
 };
 use crate::bindings::wasi::clocks::monotonic_clock;
