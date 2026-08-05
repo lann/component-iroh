@@ -14,9 +14,9 @@ build-components:
     mkdir -p target/components
     wac plug target/wasm32-wasip2/release/iroh_endpoint_demo.wasm --plug target/wasm32-wasip2/release/iroh_endpoint.wasm -o target/components/iroh-demo.wasm
 
-# Build the Wasmtime host binaries.
+# Build the Wasmtime host binaries and the native interop peer.
 build-hosts:
-    cargo build -p iroh-spike-host-wasmtime --release
+    cargo build -p iroh-spike-host-wasmtime -p iroh-peer --release
 
 # Build the stock upstream relay server (used by the matrix and demos).
 relay-build:
@@ -38,6 +38,7 @@ fmt-check:
 
 clippy:
     cargo clippy --all-targets
+    cargo clippy -p iroh-peer --all-targets
     cargo clippy -p iroh-spike-guest -p iroh-endpoint -p iroh-endpoint-demo -p iroh-exec-model-guest --target wasm32-wasip2
 
 validate-wit:

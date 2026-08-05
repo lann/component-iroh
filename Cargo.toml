@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "guest", "endpoint", "endpoint-demo", "host-wasmtime", "experiments/exec-model/guest"]
+members = ["core", "guest", "endpoint", "endpoint-demo", "host-wasmtime", "experiments/exec-model/guest", "tools/iroh-peer"]
 # The native (host-target) crates: bare cargo commands cover exactly this
 # set. The wasm-only components build for their target through the
 # justfile recipes.

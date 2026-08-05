@@ -1,0 +1,15 @@
+[package]
+name = "iroh-peer"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The upstream implementation under test, from the pinned checkout.
+# Its workspace-inherited deps resolve against .deps/iroh's own root
+# (.deps is excluded from this workspace).
+iroh = { path = "../../.deps/iroh/iroh" }
+
+anyhow = "1"
+hex = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -13,6 +13,7 @@ SPIKE_WASM=target/wasm32-wasip2/release/iroh_spike_guest.wasm
 COMPOSED_WASM=target/components/iroh-demo.wasm
 HOST=target/release/iroh-spike-host
 EHOST=target/release/endpoint-demo
+IROH_PEER=target/release/iroh-peer
 LOGDIR=$(mktemp -d)
 FAILURES=0
 
@@ -132,14 +133,36 @@ run_pair "endpoint-relay-wasmtime-wasmtime" \
         --message "matrix endpoint" --peer
 
 # The UDP direct path: the server binds a real socket (port 0 =
-# ephemeral) and the client dials the scraped address. connect()
-# prefers the ip entry with no relay fallback, so a passing echo is
-# the assertion that QUIC flowed over UDP.
+# ephemeral) and the client dials the scraped address. The client
+# must bind its own socket too — without one, connect() ignores ip
+# entries (the recorded narrowing) and would quietly assert the relay
+# path instead. connect() prefers the ip entry with no relay
+# fallback, so a passing echo is the assertion that QUIC flowed over
+# UDP.
 run_pair "endpoint-udp-wasmtime-wasmtime" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
         --udp-bind 127.0.0.1:0 -- \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
-        --message "matrix udp" --direct @DIRECT@ --peer
+        --udp-bind 127.0.0.1:0 --message "matrix udp" --direct @DIRECT@ --peer
+
+# --- upstream interop: wire-format compatibility with iroh v1 -------------
+#
+# The same echo against the real iroh implementation (tools/iroh-peer:
+# loopback UDP only, relays and discovery disabled), in both directions.
+# The upstream peer plays no part in our relay; a passing echo proves
+# the QUIC + RPK-TLS wire against upstream, not just against ourselves.
+
+run_pair "interop-udp-ours-client" \
+    timeout 120 "$IROH_PEER" --role server -- \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
+        --udp-bind 127.0.0.1:0 --message "interop ours-client" \
+        --direct @DIRECT@ --peer
+
+run_pair "interop-udp-theirs-client" \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
+        --udp-bind 127.0.0.1:0 -- \
+    timeout 120 "$IROH_PEER" --role client \
+        --message "interop theirs-client" --direct @DIRECT@ --peer
 
 # --- endpoint surface: failure paths must fail closed, in bounded time ----
 #
