@@ -1,0 +1,9 @@
+# cargo-binstall release assets for v1.21.1
+# (https://github.com/cargo-bins/cargo-binstall/releases/tag/v1.21.1),
+# recorded from downloads cross-checked against the GitHub release API's
+# published digests. `setup.sh` refuses an asset that does not match, and
+# platforms not listed here fall back to `cargo install --locked`.
+# Format: <sha256>  <asset>  (sha256sum -c compatible)
+630c8f8803a686aa6779497f0f0fb51d49822fb5fc3c514d8ced33b34e338e6e  cargo-binstall-x86_64-unknown-linux-musl.tgz
+1dc2979f3c83aade9a1b4344589d14fafa63459b759222528d11419f5cca9cc2  cargo-binstall-aarch64-unknown-linux-musl.tgz
+392ec16ab05887f45c6c349f1d26d7f43a340f7bd04dc5db6f455d1f50d9b09b  cargo-binstall-universal-apple-darwin.zip
