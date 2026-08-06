@@ -29,9 +29,7 @@
 
 use core::time::Duration;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-#[cfg(unix)]
-use std::os::unix::io::AsFd;
-#[cfg(all(target_family = "wasm", target_os = "wasi"))]
+#[cfg(any(unix, target_os = "wasi"))]
 use std::os::fd::AsFd;
 #[cfg(windows)]
 use std::os::windows::io::AsSocket;
@@ -224,7 +222,7 @@ fn log_sendmsg_error(_: &Mutex<Instant>, _: impl core::fmt::Debug, _: &Transmit<
 #[cfg(not(wasm_browser))]
 pub struct UdpSockRef<'a>(socket2::SockRef<'a>);
 
-#[cfg(any(unix, all(target_family = "wasm", target_os = "wasi")))]
+#[cfg(any(unix, target_os = "wasi"))]
 impl<'s, S> From<&'s S> for UdpSockRef<'s>
 where
     S: AsFd,
