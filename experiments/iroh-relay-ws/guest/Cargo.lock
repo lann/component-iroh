@@ -1432,9 +1432,6 @@ name = "iroh-relay-ws-guest"
 version = "0.0.1"
 dependencies = [
  "iroh",
- "iroh-base",
- "n0-watcher",
- "noq-udp",
  "tokio",
  "tracing",
  "tracing-subscriber",

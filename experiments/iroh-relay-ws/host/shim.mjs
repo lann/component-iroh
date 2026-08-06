@@ -246,12 +246,35 @@ export const BRIDGE_ADDR = {
 
 let nextEphemeralPort = 0xc000;
 
-/** Bridges by well-known destination port (1 = relay ws, 2 = webrtc). */
+/** Bridges by well-known destination port (1 = relay ws, 2 = webrtc control). */
 const bridges = new Map();
 
 /** Bridge hook: claim every guest datagram sent to the given port. */
 export function registerBridge(port, cb) {
   bridges.set(port, cb);
+}
+
+/**
+ * Overlay routes by full destination address ("a.b.c.d:port"), consulted
+ * before the port bridges: synthetic peer addresses assigned by a bridge
+ * route here, whatever socket the guest sends from.
+ */
+const addrRoutes = new Map();
+
+const addrKey = (remoteAddress) =>
+  `${remoteAddress.val.address.join(".")}:${remoteAddress.val.port}`;
+
+/** Bridge hook: claim guest datagrams to one synthetic address. */
+export function registerAddrRoute(address, port, cb) {
+  addrRoutes.set(`${address.join(".")}:${port}`, cb);
+}
+
+/** All bound sockets by assigned local port (for bridge-initiated delivery). */
+const socketsByPort = new Map();
+
+/** Bridge hook: find a guest socket by its bound local port. */
+export function socketByLocalPort(port) {
+  return socketsByPort.get(port);
 }
 
 /** Bridge hook: deliver a datagram to a socket, from the given address. */
@@ -280,6 +303,10 @@ class IncomingDatagramStream {
   [Symbol.dispose]() {}
 }
 
+/** Unroutable destinations already reported (e.g. net_report QAD probes
+ * toward the relay's UDP port — unreachable through the pipe by design). */
+const unbridgedLogged = new Set();
+
 class OutgoingDatagramStream {
   #sock;
   constructor(sock) {
@@ -291,12 +318,21 @@ class OutgoingDatagramStream {
   send(datagrams) {
     for (const d of datagrams) {
       stats.datagramsOut++;
+      const route = d.remoteAddress?.val ? addrRoutes.get(addrKey(d.remoteAddress)) : undefined;
+      if (route) {
+        route(this.#sock, d);
+        continue;
+      }
       const port = d.remoteAddress?.val?.port;
       const bridge = bridges.get(port);
       if (bridge) {
         bridge(this.#sock, d);
       } else {
-        console.error(`[shim] datagram to unbridged port ${port}; dropping`);
+        const key = d.remoteAddress?.val ? addrKey(d.remoteAddress) : String(port);
+        if (!unbridgedLogged.has(key)) {
+          unbridgedLogged.add(key);
+          console.error(`[shim] datagrams to unbridged ${key}; dropping (reported once)`);
+        }
       }
     }
     return BigInt(datagrams.length);
@@ -344,6 +380,7 @@ export class UdpSocket {
     }
     this.localAddr = addr;
     this.bound = true;
+    socketsByPort.set(addr.val.port, this);
   }
   stream(_remote) {
     return [new IncomingDatagramStream(this), new OutgoingDatagramStream(this)];

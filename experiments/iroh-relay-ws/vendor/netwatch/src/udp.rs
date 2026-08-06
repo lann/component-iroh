@@ -901,16 +901,21 @@ impl SocketState {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        if let Some((socket, _)) = self.socket.write().unwrap().close()
-            && let Ok(handle) = tokio::runtime::Handle::try_current()
-        {
-            // No wakeup after dropping write lock here, since we're getting dropped.
+        if let Some((socket, _)) = self.socket.write().unwrap().close() {
             // this will be empty if `close` was called before
             let std_sock = socket.into_std();
-            handle.spawn_blocking(move || {
-                // Calls libc::close, which can block
-                drop(std_sock);
-            });
+            // Single-threaded targets have no blocking pool to defer to;
+            // close inline (close does not block there).
+            #[cfg(posix_minimal)]
+            drop(std_sock);
+            #[cfg(not(posix_minimal))]
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                // No wakeup after dropping write lock here, since we're getting dropped.
+                handle.spawn_blocking(move || {
+                    // Calls libc::close, which can block
+                    drop(std_sock);
+                });
+            }
         }
     }
 }

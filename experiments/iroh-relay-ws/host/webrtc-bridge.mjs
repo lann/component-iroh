@@ -1,33 +1,50 @@
-// The WebRTC bridge: pairs guest endpoints over real data channels
-// through the polymorph-webrtc-datachannels host module (W3C
-// RTCPeerConnection — node-datachannel's polyfill under Node, the
-// browser global in a browser), and moves the guest's synthetic
-// datagrams through them. Counterpart of the guest's
-// `webrtc_transport.rs` (bridge address 127.0.0.1:2, tag byte first):
+// The WebRTC overlay bridge: assigns each registered endpoint a synthetic
+// IP address, and carries datagrams for that address over real data
+// channels through the polymorph-webrtc-datachannels host module
+// (node-datachannel's W3C polyfill under Node, the browser global in a
+// browser). The guest runs stock iroh IP transports; the synthetic
+// address enters iroh through `Endpoint::add_external_addr`, rides the
+// NAT-traversal candidate exchange, and the holepunch probes are
+// delivered over the channel — the overlay approach from issue #26.
 //
-//   guest -> bridge  0x00 <32B own endpoint id>          register socket
-//   guest -> bridge  0x01 <32B dst endpoint id> <bytes>  one datagram
-//   bridge -> guest  0x01 <32B src endpoint id> <bytes>  one datagram
+// Control protocol on the well-known bridge port 2 (one control socket
+// per endpoint, distinct from the iroh UDP socket):
 //
-// Channels are unreliable and unordered (a datagram carrier); pairing is
-// eager at registration, with in-process loopback signaling (both peers
-// live behind this bridge — in the real design signaling rides the
-// relay). Eager pairing keeps the channel open before iroh's first dial
-// probe: the dial race is winner-take-all, so a channel still in ICE
-// loses the race by construction. Lazy pairing on first send remains as
-// a fallback, buffering datagrams until the channel opens.
+//   guest -> bridge  0x00 <32B endpoint id> <2B BE udp port>   register
+//   bridge -> guest  0x01 <4B ipv4> <2B BE port>               assigned addr
+//   bridge -> guest  0x02                                      channel ready
+//
+// Data datagrams never touch port 2: sends to a synthetic address are
+// claimed by an addr route (whatever socket they come from) and travel
+// raw over the pair's channel; receipts are pushed into the peer's
+// registered iroh UDP socket with the sender's synthetic address as the
+// source. Channels are unreliable and unordered (label "quic",
+// maxRetransmits=0); pairing is eager at registration so the channel is
+// open before iroh's first probe, with in-process loopback signaling
+// (both peers live behind this bridge — in the real design signaling
+// rides the relay). While a channel is still connecting, up to 64
+// datagrams are buffered and flushed on open.
 
 import {
   DataChannelOptions,
   PeerConnection,
   PeerConnectionConfig,
 } from "../../../.deps/webrtc/jco-impl/webrtc.js";
-import { registerBridge, pushDatagram } from "./shim.mjs";
+import {
+  registerBridge,
+  registerAddrRoute,
+  socketByLocalPort,
+  pushDatagram,
+} from "./shim.mjs";
 
 const WEBRTC_FROM = { tag: "ipv4", val: { port: 2, address: [127, 0, 0, 1] } };
 const TAG_REGISTER = 0x00;
-const TAG_DATAGRAM = 0x01;
+const TAG_ASSIGNED = 0x01;
+const TAG_READY = 0x02;
 const ID_LEN = 32;
+// Synthetic peer addresses: 100.64.0.<index>:4433 (CGNAT space; spike-local
+// fiction — the real design wants a random-prefix ULA, see issue #26).
+const SYN_PORT = 4433;
 
 export const webrtcStats = {
   channelsOpened: 0,
@@ -36,10 +53,11 @@ export const webrtcStats = {
   out: 0,
 };
 
-/** id hex -> { socket, idBytes } */
+/** id hex -> { controlSocket, idBytes, udpPort, synAddr } */
 const peers = new Map();
-/** sorted "a|b" key -> { state: 'connecting'|'open'|'failed', send(fromHex, bytes) } */
+/** sorted "a|b" key -> { state: 'connecting'|'open'|'failed', send(fromHex, bytes), backlog } */
 const links = new Map();
+let nextPeerIndex = 1;
 
 const hex = (bytes) =>
   Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -51,57 +69,94 @@ function linkKey(a, b) {
 const t0 = Date.now();
 const ts = () => `t+${Date.now() - t0}ms`;
 
+function synFrom(peer) {
+  return { tag: "ipv4", val: { port: SYN_PORT, address: peer.synAddr } };
+}
+
+/** Forward one raw datagram from `srcHex` toward `dstHex`, buffering while
+ * the channel connects. */
+function forward(srcHex, dstHex, bytes) {
+  const key = linkKey(srcHex, dstHex);
+  let link = links.get(key);
+  if (!link) {
+    // Both ends register before any probe can target them, so pairing has
+    // normally started already; this is a fallback.
+    link = { state: "connecting", send: null, backlog: [] };
+    links.set(key, link);
+    console.log(`[webrtc-bridge] ${ts()} lazy pairing ${key.slice(0, 17)}`);
+    void establish(key, link, srcHex, dstHex);
+  }
+  if (link.state === "open") {
+    webrtcStats.out++;
+    link.send(srcHex, bytes);
+  } else if (link.state === "connecting" && link.backlog.length < 64) {
+    link.backlog.push([srcHex, bytes]);
+  } else {
+    webrtcStats.droppedWhileConnecting++;
+  }
+}
+
 registerBridge(2, (socket, { data }) => {
-  if (data.length === 0) return;
-  switch (data[0]) {
-    case TAG_REGISTER: {
-      const id = hex(data.subarray(1, 1 + ID_LEN));
-      peers.set(id, { socket, idBytes: data.slice(1, 1 + ID_LEN) });
-      socket.webrtcId = id;
-      console.log(`[webrtc-bridge] ${ts()} register ${id.slice(0, 8)} (peers=${peers.size})`);
-      for (const other of peers.keys()) {
-        if (other === id) continue;
-        const key = linkKey(id, other);
-        if (!links.has(key)) {
-          const link = { state: "connecting", send: null, backlog: [] };
-          links.set(key, link);
-          console.log(`[webrtc-bridge] ${ts()} eager pairing ${key.slice(0, 17)}`);
-          void establish(key, link, id, other);
+  if (data.length === 0 || data[0] !== TAG_REGISTER) {
+    console.error(`[webrtc-bridge] unexpected control frame tag ${data[0]}`);
+    return;
+  }
+  if (data.length < 1 + ID_LEN + 2) {
+    console.error("[webrtc-bridge] short register frame");
+    return;
+  }
+  const id = hex(data.subarray(1, 1 + ID_LEN));
+  const udpPort = (data[1 + ID_LEN] << 8) | data[2 + ID_LEN];
+  const index = nextPeerIndex++;
+  const peer = {
+    controlSocket: socket,
+    idBytes: data.slice(1, 1 + ID_LEN),
+    udpPort,
+    synAddr: [100, 64, 0, index],
+  };
+  peers.set(id, peer);
+  console.log(
+    `[webrtc-bridge] ${ts()} register ${id.slice(0, 8)} udp=${udpPort} -> 100.64.0.${index}:${SYN_PORT}`,
+  );
+
+  // Datagrams to this peer's synthetic address, from any guest socket,
+  // go over the sender's channel to it.
+  registerAddrRoute(peer.synAddr, SYN_PORT, (senderSocket, d) => {
+    let srcHex = senderSocket.overlayOwner;
+    if (!srcHex) {
+      const port = senderSocket.localAddress().val.port;
+      for (const [otherHex, other] of peers) {
+        if (other.udpPort === port) {
+          srcHex = senderSocket.overlayOwner = otherHex;
+          break;
         }
       }
-      break;
     }
-    case TAG_DATAGRAM: {
-      const src = socket.webrtcId;
-      if (!src) {
-        console.error("[webrtc-bridge] datagram before register; dropping");
-        return;
-      }
-      const dst = hex(data.subarray(1, 1 + ID_LEN));
-      const payload = data.subarray(1 + ID_LEN);
-      const key = linkKey(src, dst);
-      let link = links.get(key);
-      if (!link) {
-        link = { state: "connecting", send: null, backlog: [] };
-        links.set(key, link);
-        console.log(`[webrtc-bridge] ${ts()} lazy pairing ${key.slice(0, 17)} (datagram before register pairing?)`);
-        void establish(key, link, src, dst);
-      }
-      if (link.state === "open") {
-        webrtcStats.out++;
-        link.send(src, payload.slice());
-      } else if (link.state === "connecting" && link.backlog.length < 64) {
-        // Buffer until the channel opens: iroh probes a path when it
-        // learns the addr and does not retry a failed validation until
-        // new addr information arrives, so the probe must survive ICE.
-        link.backlog.push([src, payload.slice()]);
-      } else {
-        webrtcStats.droppedWhileConnecting++;
-      }
-      break;
+    if (!srcHex) {
+      console.error("[webrtc-bridge] datagram from unregistered socket; dropping");
+      return;
     }
-    default:
-      console.error(`[webrtc-bridge] unknown tag ${data[0]}`);
+    forward(srcHex, id, d.data.slice());
+  });
+
+  // Tell the guest its assigned address.
+  const assigned = new Uint8Array(1 + 4 + 2);
+  assigned[0] = TAG_ASSIGNED;
+  assigned.set(peer.synAddr, 1);
+  assigned[5] = SYN_PORT >> 8;
+  assigned[6] = SYN_PORT & 0xff;
+  pushDatagram(socket, assigned, WEBRTC_FROM);
+
+  // Eager pairing: open the channel before iroh's first probe needs it.
+  for (const other of peers.keys()) {
+    if (other === id) continue;
+    const key = linkKey(id, other);
+    if (!links.has(key)) {
+      const link = { state: "connecting", send: null, backlog: [] };
+      links.set(key, link);
+      console.log(`[webrtc-bridge] ${ts()} eager pairing ${key.slice(0, 17)}`);
+      void establish(key, link, id, other);
+    }
   }
 });
 
@@ -128,8 +183,9 @@ async function firstIncomingChannel(pc) {
   return value;
 }
 
-/** Pump channel messages to the owning guest socket, tagged with the peer. */
-function pumpChannel(channel, ownerHex, peerIdBytes) {
+/** Pump channel messages into the owner's iroh UDP socket, sourced from the
+ * remote peer's synthetic address. */
+function pumpChannel(channel, ownerHex, remoteHex) {
   void (async () => {
     for (;;) {
       let message;
@@ -144,12 +200,11 @@ function pumpChannel(channel, ownerHex, peerIdBytes) {
       webrtcStats.in++;
       const bytes =
         message.tag === "binary" ? message.val : new TextEncoder().encode(message.val);
-      const frame = new Uint8Array(1 + ID_LEN + bytes.length);
-      frame[0] = TAG_DATAGRAM;
-      frame.set(peerIdBytes, 1);
-      frame.set(bytes, 1 + ID_LEN);
-      const peer = peers.get(ownerHex);
-      if (peer) pushDatagram(peer.socket, frame, WEBRTC_FROM);
+      const owner = peers.get(ownerHex);
+      const remote = peers.get(remoteHex);
+      if (!owner || !remote) continue;
+      const sock = socketByLocalPort(owner.udpPort);
+      if (sock) pushDatagram(sock, bytes, synFrom(remote));
     }
   })();
 }
@@ -185,8 +240,8 @@ async function establish(key, link, a, b) {
     await pcR.waitConnected();
 
     const chans = { [ini]: chI, [resp]: chR };
-    pumpChannel(chI, ini, peers.get(resp).idBytes);
-    pumpChannel(chR, resp, peers.get(ini).idBytes);
+    pumpChannel(chI, ini, resp);
+    pumpChannel(chR, resp, ini);
 
     const sendChains = { [ini]: Promise.resolve(), [resp]: Promise.resolve() };
     link.send = (fromHex, bytes) => {
@@ -205,6 +260,12 @@ async function establish(key, link, a, b) {
     for (const [fromHex, bytes] of link.backlog.splice(0)) {
       webrtcStats.out++;
       link.send(fromHex, bytes);
+    }
+    // Readiness gates the guest's add_external_addr: probes fired before
+    // the channel opens would only be buffered, not answered in time.
+    for (const end of [a, b]) {
+      const peer = peers.get(end);
+      if (peer) pushDatagram(peer.controlSocket, new Uint8Array([TAG_READY]), WEBRTC_FROM);
     }
   } catch (err) {
     link.state = "failed";
