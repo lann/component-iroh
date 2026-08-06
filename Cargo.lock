@@ -52,6 +52,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpubits",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -629,6 +630,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -2598,9 +2600,9 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "iroh-endpoint-core",
- "polymorph-tls-quinn",
+ "noq-proto",
+ "polymorph-tls-quic",
  "polymorph-webcrypto-guest",
- "quinn-proto",
  "rustls",
  "serde",
  "serde_json",
@@ -2614,7 +2616,7 @@ dependencies = [
  "blake3",
  "hex",
  "polymorph-tls-profile",
- "polymorph-tls-quinn",
+ "polymorph-tls-quic",
  "polymorph-webcrypto-guest",
  "postcard",
  "rustls",
@@ -2730,8 +2732,8 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "iroh-endpoint-core",
- "polymorph-tls-quinn",
- "quinn-proto",
+ "noq-proto",
+ "polymorph-tls-quic",
  "rustls",
  "serde",
  "serde_json",
@@ -3353,9 +3355,9 @@ dependencies = [
 
 [[package]]
 name = "noq"
-version = "1.1.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09e4bb6601fa543c110d8957813267d5a8d775a0f8fbaccf1f615d06ba9b10da"
+checksum = "e11803df44ac03a30988d61585ea50885d5428e42da944fe1e498799da7886a2"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3375,9 +3377,9 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
+checksum = "334c3c9833f7b2c573cceb9896ddc7aaeb58c8807cbb63211b24d1fe88bf866e"
 dependencies = [
  "aes-gcm 0.10.3",
  "bytes",
@@ -3936,7 +3938,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "polymorph-tls-quinn"
+name = "polymorph-tls-quic"
 version = "0.1.0"
 dependencies = [
  "aead 0.6.1",
@@ -3947,14 +3949,15 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "hkdf 0.13.0",
  "hmac 0.13.0",
+ "noq-proto",
  "polymorph-tls",
  "polymorph-tls-profile",
- "quinn-proto",
  "rustls",
  "rustls-pki-types",
  "rustls-rustcrypto",
  "sha2 0.11.0",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -4246,27 +4249,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "quinn-proto"
-version = "0.11.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
-dependencies = [
- "bytes",
- "getrandom 0.4.3",
- "lru-slab",
- "rand 0.10.2",
- "rand_pcg",
- "ring",
- "rustc-hash",
- "rustls-pki-types",
- "slab",
- "thiserror 2.0.19",
- "tinyvec",
- "tracing",
- "web-time",
 ]
 
 [[package]]

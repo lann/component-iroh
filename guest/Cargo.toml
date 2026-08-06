@@ -10,8 +10,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 iroh-endpoint-core = { path = "../core" }
-polymorph-tls-quinn = { path = "../.deps/tls/rust/quinn" }
-quinn-proto = { version = "=0.11.16", default-features = false }
+polymorph-tls-quic = { path = "../.deps/tls/rust/quic" }
+noq-proto = { version = "=1.1.0", default-features = false }
 rustls = { version = "=0.23.43", default-features = false, features = ["std", "custom-provider"] }
 getrandom = "0.4"
 bytes = "1"

@@ -32,7 +32,7 @@ use crate::endpoint_impl::{Shared, POLL_NS};
 pub const SIGNAL_PREFIX: u8 = 0x00;
 
 /// Bound on one signaling dance; a silent peer fails `connect-failed`
-/// rather than hanging (mirrors quinn's default idle timeout).
+/// rather than hanging (mirrors noq's default idle timeout).
 const SIGNAL_DEADLINE: Duration = Duration::from_secs(30);
 
 /// One negotiated channel and the peer connection that owns it. The

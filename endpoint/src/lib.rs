@@ -5,8 +5,8 @@
 //! One `bind` mints an identity, opens the home relay connection, binds
 //! the UDP socket when asked, and spawns a detached pump task that owns
 //! all I/O: relay, UDP, and channel datagrams in and out, WebRTC
-//! signaling dispatch, quinn's timers, and the wake-ups for every future
-//! a resource method parked. Resource methods mutate the shared quinn
+//! signaling dispatch, noq's timers, and the wake-ups for every future
+//! a resource method parked. Resource methods mutate the shared noq
 //! state directly and kick the pump to flush the consequences.
 //!
 //! v0 narrowings (each a recorded latitude, not a design ruling): the
