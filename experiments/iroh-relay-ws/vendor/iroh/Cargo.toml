@@ -34,7 +34,6 @@ keywords = [
 ]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/n0-computer/iroh"
-resolver = "2"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -197,6 +196,23 @@ path = "tests/integration.rs"
 name = "patchbay"
 path = "tests/patchbay.rs"
 
+[dependencies]
+bytes = "1.11"
+data-encoding = "2.2"
+futures-util = "0.3"
+http = "1"
+ipnet = "2"
+n0-error = "1.0.0"
+n0-future = "0.3"
+n0-watcher = "1.0.0"
+netwatch = "0.19.1"
+pin-project = "1"
+portable-atomic = "1"
+rand = "0.10"
+rustc-hash = "2"
+smallvec = "1.11.1"
+tracing = "0.1"
+
 [dependencies.axum]
 version = "0.8"
 optional = true
@@ -208,15 +224,9 @@ version = "1.4"
 version = "1.8.3"
 default-features = false
 
-[dependencies.bytes]
-version = "1.11"
-
 [dependencies.ctutils]
 version = "0.4.0"
 default-features = false
-
-[dependencies.data-encoding]
-version = "2.2"
 
 [dependencies.derive_more]
 version = "2.0.1"
@@ -240,15 +250,6 @@ features = [
     "pem",
 ]
 
-[dependencies.futures-util]
-version = "0.3"
-
-[dependencies.http]
-version = "1"
-
-[dependencies.ipnet]
-version = "2"
-
 [dependencies.iroh-base]
 version = "1.0.3"
 features = [
@@ -259,6 +260,7 @@ default-features = false
 
 [dependencies.iroh-dns]
 version = "1.0.3"
+path = "../iroh-dns"
 
 [dependencies.iroh-metrics]
 version = "1.0.1"
@@ -266,19 +268,8 @@ default-features = false
 
 [dependencies.iroh-relay]
 version = "1.0.3"
+path = "../iroh-relay"
 default-features = false
-
-[dependencies.n0-error]
-version = "1.0.0"
-
-[dependencies.n0-future]
-version = "0.3"
-
-[dependencies.n0-watcher]
-version = "1.0.0"
-
-[dependencies.netwatch]
-version = "0.19.1"
 
 [dependencies.noq]
 version = "1.1.0"
@@ -297,15 +288,6 @@ default-features = false
 version = "0.2.3"
 default-features = false
 
-[dependencies.pin-project]
-version = "1"
-
-[dependencies.portable-atomic]
-version = "1"
-
-[dependencies.rand]
-version = "0.10"
-
 [dependencies.reqwest]
 version = "0.13"
 features = [
@@ -313,9 +295,6 @@ features = [
     "stream",
 ]
 default-features = false
-
-[dependencies.rustc-hash]
-version = "2"
 
 [dependencies.rustls]
 version = "0.23.33"
@@ -327,9 +306,6 @@ features = [
     "derive",
     "rc",
 ]
-
-[dependencies.smallvec]
-version = "1.11.1"
 
 [dependencies.strum]
 version = "0.28"
@@ -356,9 +332,6 @@ features = [
     "rt",
 ]
 
-[dependencies.tracing]
-version = "0.1"
-
 [dependencies.url]
 version = "2.5"
 features = ["serde"]
@@ -367,11 +340,10 @@ features = ["serde"]
 version = "1.12"
 package = "rustls-pki-types"
 
-[dev-dependencies.chrono]
-version = "0.4.43"
-
-[dev-dependencies.console_error_panic_hook]
-version = "0.1"
+[dev-dependencies]
+chrono = "0.4.43"
+console_error_panic_hook = "0.1"
+rand_chacha = "0.10"
 
 [dev-dependencies.n0-error]
 version = "1.0.0"
@@ -381,15 +353,15 @@ features = ["anyhow"]
 version = "1.1.1"
 features = ["use-std"]
 
-[dev-dependencies.rand_chacha]
-version = "0.10"
-
 [dev-dependencies.tracing-subscriber]
 version = "0.3"
 features = ["env-filter"]
 
 [build-dependencies.cfg_aliases]
 version = "0.2.2"
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies.getrandom]
 version = "0.4"
@@ -399,14 +371,9 @@ features = ["wasm_js"]
 version = "0.3"
 features = ["wasm-bindgen"]
 
-[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies.wasm-bindgen-futures]
-version = "0.4"
-
-[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies.wasm-bindgen-test]
-version = "0.3.62"
-
-[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies.wasm-tracing]
-version = "2.1.0"
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3.62"
+wasm-tracing = "2.1.0"
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies.hickory-resolver]
 version = "0.26.0"
@@ -437,8 +404,12 @@ features = [
     "io-std",
 ]
 
-[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.assert_matches]
-version = "1.5.0"
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies]
+assert_matches = "1.5.0"
+n0-tracing-test = "0.3"
+pretty_assertions = "1.4"
+rand_chacha = "0.10"
+serde_json = "1"
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.axum]
 version = "0.8"
@@ -464,27 +435,16 @@ default-features = false
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.iroh-relay]
 version = "1.0.3"
+path = "../iroh-relay"
 features = [
     "test-utils",
     "server",
 ]
 default-features = false
 
-[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.n0-tracing-test]
-version = "0.3"
-
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.parse-size]
 version = "1.1.0"
 features = ["std"]
-
-[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.pretty_assertions]
-version = "1.4"
-
-[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.rand_chacha]
-version = "0.10"
-
-[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.serde_json]
-version = "1"
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.tokio]
 version = "1"
@@ -503,15 +463,13 @@ features = [
 version = "0.3"
 features = ["env-filter"]
 
-[target.'cfg(target_os = "linux")'.dev-dependencies.ctor]
-version = "1.0"
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ctor = "1.0"
+testdir = "0.10"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies.patchbay]
-version = "0.6"
+version = "0.7"
 features = ["iroh-metrics"]
-
-[target.'cfg(target_os = "linux")'.dev-dependencies.testdir]
-version = "0.10"
 
 [lints.clippy]
 unused-async = "warn"
