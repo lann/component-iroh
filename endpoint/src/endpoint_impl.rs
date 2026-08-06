@@ -45,10 +45,10 @@ use crate::bindings::polymorph::iroh::types::{
 };
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::bindings::wit_stream;
-use crate::relay::RelayConn;
 use crate::udp::UdpWire;
 use crate::webrtc::{self, ChannelWire, SIGNAL_PREFIX};
 use crate::Component;
+use iroh_endpoint_core::relay::RelayConn;
 use wit_bindgen::rt::async_support::StreamReader;
 
 /// The pump's tick: quinn's deadlines, and the bound on how stale a
