@@ -7,9 +7,10 @@ members = ["core", "guest", "endpoint", "endpoint-demo", "host-wasmtime", "exper
 default-members = ["core", "guest", "host-wasmtime"]
 # The sibling checkouts under .deps are their own workspaces; without the
 # exclusion cargo binds their workspace-inheriting members to this root.
-# experiments/udp-wake is likewise its own workspace: it needs no sibling
-# checkouts and builds with its own RUSTFLAGS (`--cfg tokio_unstable`).
-exclude = [".deps", "experiments/udp-wake"]
+# experiments/udp-wake and experiments/iroh-relay-ws are likewise their own
+# workspaces: they need no sibling checkouts and build with their own
+# RUSTFLAGS (`--cfg tokio_unstable`).
+exclude = [".deps", "experiments/udp-wake", "experiments/iroh-relay-ws"]
 
 [workspace.package]
 edition = "2021"

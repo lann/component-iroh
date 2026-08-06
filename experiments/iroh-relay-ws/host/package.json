@@ -1,0 +1,14 @@
+{
+  "name": "iroh-relay-ws-host",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Spike host: upstream iroh (wasip2, jco/JSPI) with the relay websocket bridged through the polymorph-websocket host module as synthetic datagrams.",
+  "scripts": {
+    "transpile": "node transpile.mjs",
+    "start": "node --experimental-wasm-jspi run.mjs"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco-transpile": "file:../../../.deps/jco/packages/jco-transpile"
+  }
+}
