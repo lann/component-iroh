@@ -67,5 +67,13 @@ bench: build transpile relay-build
 interop-prod: build
     ./scripts/interop-prod.sh
 
+# The synthetic-UDP wake probe (issue #14): a tokio reactor inside a
+# jco/JSPI wasip2 component, woken from JS through a synthetic
+# wasi:sockets shim. A research probe attached to the issue, so manual:
+# not part of `ci`. Needs the jco fork from setup.sh.
+udp-wake:
+    cd experiments/udp-wake/guest && cargo build --release
+    cd experiments/udp-wake/host && npm install --no-audit --no-fund && npm run transpile && timeout 120 npm start
+
 # The full gate.
 ci: fmt-check clippy validate-wit test probes matrix bench

@@ -6,3 +6,5 @@ node_modules
 /host-jco/generated-endpoint
 /host-jco/generated-endpoint-demo
 /host-jco/build
+/experiments/udp-wake/guest/target
+/experiments/udp-wake/host/generated
