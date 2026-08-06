@@ -11,7 +11,7 @@ sibling family
 ([`polymorph:webcrypto`](https://github.com/polymorph-components/polymorph-webcrypto),
 [`polymorph:webrtc-datachannels`](https://github.com/polymorph-components/polymorph-webrtc-datachannels),
 [`polymorph:websocket`](https://github.com/polymorph-components/polymorph-websocket),
-[`component-test`](https://github.com/polymorph-components/polymorph-test)) and mirrors
+[`polymorph-test`](https://github.com/polymorph-components/polymorph-test)) and mirrors
 their architecture and conventions — prefer clarity and correctness over
 features, and keep every deployment target behaviourally in sync
 (cross-implementation conformance is the gate once it exists). See

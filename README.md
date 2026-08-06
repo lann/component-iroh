@@ -8,7 +8,7 @@ all three — built on the
 [`polymorph:webrtc-datachannels`](https://github.com/polymorph-components/polymorph-webrtc-datachannels),
 and [`polymorph:websocket`](https://github.com/polymorph-components/polymorph-websocket)
 packages and the
-[`component-test`](https://github.com/polymorph-components/polymorph-test) machinery.
+[`polymorph-test`](https://github.com/polymorph-components/polymorph-test) machinery.
 
 Status: **proposal**. This README records the design research and the
 rulings it produced; open questions are tracked in the
