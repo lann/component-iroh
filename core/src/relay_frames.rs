@@ -4,9 +4,11 @@
 //!
 //! One frame is one binary websocket message: a QUIC-varint frame type
 //! followed by the frame payload. Handshake payloads are postcard-encoded
-//! structs; datagram payloads are hand-rolled (32-byte endpoint ID, ECN
-//! byte, optional u16 segment size for batches, contents). The known-answer
-//! tests mirror `iroh-relay`'s own snapshot vectors.
+//! structs, serialized with `postcard` over mirrors of upstream's types;
+//! datagram payloads are byte-level layouts upstream specifies directly
+//! (32-byte endpoint ID, ECN byte, optional u16 segment size for batches,
+//! contents), assembled here. The known-answer tests mirror
+//! `iroh-relay`'s own snapshot vectors.
 
 /// Frame type tags (`iroh-relay`'s `FrameType`).
 pub mod tag {
@@ -67,15 +69,29 @@ pub fn encode_client_datagram(dst: &[u8; 32], payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+/// `iroh-relay`'s `ClientAuth` handshake payload. The signature is a
+/// length-prefixed byte sequence on the wire; postcard's seq-of-`u8`
+/// encoding (varint length, raw bytes) is byte-identical to upstream's
+/// `serde_bytes` form.
+#[derive(serde::Serialize)]
+struct ClientAuth<'a> {
+    public_key: &'a [u8; 32],
+    signature: &'a [u8],
+}
+
 /// Encode a `client-auth` handshake frame: the postcard encoding of
-/// `{ public_key: [u8; 32], signature: bytes }`.
+/// [`ClientAuth`].
 pub fn encode_client_auth(public_key: &[u8; 32], signature: &[u8; 64]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(1 + 32 + 1 + 64);
     frame.push(tag::CLIENT_AUTH as u8);
-    frame.extend_from_slice(public_key);
-    frame.push(64); // postcard length prefix of the serde_bytes signature
-    frame.extend_from_slice(signature);
-    frame
+    postcard::to_extend(
+        &ClientAuth {
+            public_key,
+            signature,
+        },
+        frame,
+    )
+    .expect("Vec-backed postcard serialization cannot fail")
 }
 
 /// Encode a `pong` frame echoing `payload`.
@@ -116,16 +132,11 @@ pub fn decode_relay_datagrams(payload: &[u8], batch: bool) -> Option<Vec<Datagra
 }
 
 /// Decode a `server-denies-auth` payload's postcard `reason` string,
-/// best-effort (diagnostics only).
+/// best-effort (diagnostics only): a payload that does not decode as a
+/// postcard string is taken lossily whole.
 pub fn decode_denial_reason(payload: &[u8]) -> String {
-    // postcard string: LEB128 length + UTF-8. Multi-byte lengths would
-    // mean a >127-byte reason; take the tail lossily in that case.
-    match payload.split_first() {
-        Some((&len, rest)) if usize::from(len) == rest.len() => {
-            String::from_utf8_lossy(rest).into_owned()
-        }
-        _ => String::from_utf8_lossy(payload).into_owned(),
-    }
+    postcard::from_bytes::<String>(payload)
+        .unwrap_or_else(|_| String::from_utf8_lossy(payload).into_owned())
 }
 
 #[cfg(test)]
@@ -208,7 +219,8 @@ mod tests {
     }
 
     /// The client-auth frame is `01` + postcard of
-    /// `{ public_key: [u8;32], signature: serde_bytes [u8;64] }`.
+    /// `{ public_key: [u8;32], signature: serde_bytes [u8;64] }` — the
+    /// hand-checked layout the postcard serialization must keep producing.
     #[test]
     fn client_auth_layout() {
         let frame = encode_client_auth(&KEY, &[7; 64]);
@@ -217,5 +229,22 @@ mod tests {
         assert_eq!(&frame[1..33], &KEY);
         assert_eq!(frame[33], 64);
         assert_eq!(&frame[34..], &[7; 64][..]);
+    }
+
+    /// Denial reasons decode exactly at every length: the short form (a
+    /// one-byte varint) and the >127-byte form (a two-byte varint the old
+    /// hand decoder could only take lossily).
+    #[test]
+    fn denial_reason_decodes_at_every_length() {
+        let short = postcard::to_allocvec(&"not authorized").unwrap();
+        assert_eq!(decode_denial_reason(&short), "not authorized");
+
+        let long = "x".repeat(200);
+        let encoded = postcard::to_allocvec(&long).unwrap();
+        assert_eq!(encoded[0] & 0x80, 0x80, "two-byte varint length");
+        assert_eq!(decode_denial_reason(&encoded), long);
+
+        // Garbage still renders, lossily.
+        assert_eq!(decode_denial_reason(&[0xff, 0x00]), "\u{fffd}\u{0}");
     }
 }
