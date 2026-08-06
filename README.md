@@ -146,14 +146,15 @@ an unmodified upstream relay (issue #2) — exercising both wires the
 design names, a WebRTC data channel and the relay connection itself.
 
 - **One guest component** (`guest/`, `wasm32-wasip2`): `quinn-proto`
-  with default features off, driven by a custom rustls `CryptoProvider`
-  implementing the crypto split — X25519 key exchange and Ed25519
-  identity sign/verify through `polymorph:webcrypto` (the identity key is a
-  non-extractable handle), while SHA-256, the HKDF key schedule, and
-  AES-128-GCM record/packet protection run in-guest (RFC 9001 known
-  answers under `cargo test`). rustls's synchronous callbacks bridge to
-  the async imports with `wit_bindgen::block_on`, which is legal because
-  the demo's only export (`demo.run`) is async-lifted.
+  with default features off over the `polymorph:tls` sibling's
+  `polymorph-tls-quinn` crypto layer, implementing the crypto split —
+  key exchange, peer verification, the key schedule, and record/packet
+  protection run in-guest under the wasm timing-class profile, while
+  Ed25519 identity signing goes through `polymorph:webcrypto` (the
+  identity key is a non-extractable handle). rustls's synchronous
+  signing callback bridges to the async import with
+  `wit_bindgen::block_on`, which is legal because the demo's only
+  export (`demo.run`) is async-lifted.
 - **Iroh-style identity**: TLS authenticates raw public keys (RFC 7250);
   the Ed25519 key in the SPKI is the endpoint ID. Signaling only
   *claims* an identity; the handshake authenticates it, and the two
