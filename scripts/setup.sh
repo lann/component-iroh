@@ -41,12 +41,75 @@ log() { printf '\n==> %s\n' "$1"; }
 log "Installing pinned Rust toolchain and wasm targets (rust-toolchain.toml)"
 rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
 
-log "Ensuring cargo-binstall is installed"
+# cargo-binstall is itself pinned: the release asset for this platform is
+# downloaded directly and verified against scripts/cargo-binstall.sha256
+# before it runs — never a floating bootstrap script. Bumping the version
+# means re-recording those digests deliberately.
+BINSTALL_VERSION="1.21.1"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+install_binstall() {
+    local asset
+    case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) asset="cargo-binstall-x86_64-unknown-linux-musl.tgz" ;;
+    Linux-aarch64) asset="cargo-binstall-aarch64-unknown-linux-musl.tgz" ;;
+    Darwin-*) asset="cargo-binstall-universal-apple-darwin.zip" ;;
+    *) asset="" ;;
+    esac
+    if [ -z "$asset" ]; then
+        echo "setup: no pinned cargo-binstall asset for $(uname -s)/$(uname -m); building from crates.io (registry checksums)" >&2
+        cargo install cargo-binstall --locked --version "$BINSTALL_VERSION"
+        return
+    fi
+
+    local want
+    want="$(grep -v '^#' scripts/cargo-binstall.sha256 | awk -v a="$asset" '$2 == a { print $1 }')"
+    if [ -z "$want" ]; then
+        echo "setup: scripts/cargo-binstall.sha256 pins no digest for ${asset}; record it deliberately" >&2
+        exit 1
+    fi
+
+    local tmp
+    tmp="$(mktemp -d)"
+    curl -fsSL --proto '=https' --tlsv1.2 -o "${tmp}/${asset}" \
+        "https://github.com/cargo-bins/cargo-binstall/releases/download/v${BINSTALL_VERSION}/${asset}"
+
+    local got
+    got="$(sha256_of "${tmp}/${asset}")"
+    if [ "$got" != "$want" ]; then
+        rm -rf "$tmp"
+        cat >&2 <<EOF
+setup: ${asset} does not match the digest pinned for cargo-binstall ${BINSTALL_VERSION}.
+  expected ${want}
+  actual   ${got}
+
+The download has been removed. Either the published asset was replaced,
+the pin is stale, or the download was tampered with. Re-record the
+digests deliberately after establishing why they changed.
+EOF
+        exit 1
+    fi
+
+    mkdir -p "$HOME/.cargo/bin"
+    case "$asset" in
+    *.tgz) tar -xzf "${tmp}/${asset}" -C "$HOME/.cargo/bin" cargo-binstall ;;
+    *.zip) unzip -q -o "${tmp}/${asset}" cargo-binstall -d "$HOME/.cargo/bin" ;;
+    esac
+    rm -rf "$tmp"
+}
+
+log "Ensuring cargo-binstall ${BINSTALL_VERSION} is installed"
 if command -v cargo-binstall >/dev/null 2>&1; then
     echo "cargo-binstall already present: $(cargo-binstall -V)"
 else
-    curl -fsSL --proto '=https' --tlsv1.2 \
-        https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+    install_binstall
 fi
 
 # Install a crate binary with cargo-binstall (prebuilt artifact when one
