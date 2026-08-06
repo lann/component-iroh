@@ -36,17 +36,31 @@ const IFACES = {
 const map = Object.fromEntries(
   Object.entries(IFACES).map(([iface, name]) => [iface, `${SHIM}#${name}`]),
 );
+// The composed probe's generic event source (unused by the single probe).
+map["probe:source/events@0.0.1"] = `${SHIM}#sourceEvents`;
 
-const { files } = await transpile(
-  "../guest/target/wasm32-wasip2/release/iroh-udp-wake-guest.wasm",
+const targets = [
   {
+    input: "../guest/target/wasm32-wasip2/release/iroh-udp-wake-guest.wasm",
     name: "udp-wake",
+    outDir: "generated",
+  },
+  {
+    input: "../composed.wasm",
+    name: "udp-wake-composed",
+    outDir: "generated-composed",
+  },
+];
+
+for (const t of targets) {
+  const { files } = await transpile(t.input, {
+    name: t.name,
     asyncMode: "jspi",
     asyncWasiImports: true,
     asyncWasiExports: true,
     map,
-    outDir: "generated",
-  },
-);
-await writeFiles(files);
-console.log("transpiled:", Object.keys(files).join(", "));
+    outDir: t.outDir,
+  });
+  await writeFiles(files);
+  console.log(`transpiled ${t.name}: ${Object.keys(files).length} files`);
+}

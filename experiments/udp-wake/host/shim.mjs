@@ -402,4 +402,55 @@ export class TcpSocket {
 export const tcp = { TcpSocket };
 export const tcpCreateSocket = { createTcpSocket: nope };
 
+// ---------------------------------------------------------------------------
+// probe:source/events — the generic host event source the composed probe's
+// virtualization component feeds on. Same queue/arrival shape as the
+// synthetic socket, but with no socket semantics at all: those moved into
+// the guest-side virt layer.
+
+const srcQueue = [];
+let srcArrivalPromise;
+let srcArrive;
+(function rearmSrc() {
+  srcArrivalPromise = new Promise(
+    (r) =>
+      (srcArrive = () => {
+        r();
+        rearmSrc();
+      }),
+  );
+})();
+
+let srcReadyResolve;
+/** Resolves on the virt layer's first drain (the guest is receiving). */
+export const sourceReady = new Promise((r) => (srcReadyResolve = r));
+
+/** Push a payload into the source queue and wake a suspended poll. */
+export function injectSource(bytes, port = 9999) {
+  stats.injected++;
+  srcQueue.push({ payload: bytes, port });
+  srcArrive();
+}
+
+export const sourceEvents = {
+  subscribe: () =>
+    new Pollable(
+      () => srcQueue.length > 0,
+      () => srcArrivalPromise,
+    ),
+  drain() {
+    srcReadyResolve();
+    return srcQueue.splice(0);
+  },
+  send(payload, port) {
+    stats.sent++;
+    if (sendListener) {
+      sendListener({
+        data: payload,
+        remoteAddress: { tag: "ipv4", val: { port, address: [127, 0, 0, 1] } },
+      });
+    }
+  },
+};
+
 export { performance };
