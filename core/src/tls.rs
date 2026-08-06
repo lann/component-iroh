@@ -36,7 +36,7 @@ pub fn client_config(
     alpns: Vec<Vec<u8>>,
 ) -> Result<rustls::ClientConfig, Error> {
     let alpns: Vec<&[u8]> = alpns.iter().map(Vec::as_slice).collect();
-    polymorph_tls_quinn::rpk_client_config(&rpk_identity(identity)?, &expected_server, &alpns)
+    polymorph_tls_quic::rpk_client_config(&rpk_identity(identity)?, &expected_server, &alpns)
 }
 
 /// A TLS 1.3 server config authenticating as `identity` and requiring
@@ -46,7 +46,7 @@ pub fn server_config(
     alpns: Vec<Vec<u8>>,
 ) -> Result<rustls::ServerConfig, Error> {
     let alpns: Vec<&[u8]> = alpns.iter().map(Vec::as_slice).collect();
-    polymorph_tls_quinn::rpk_server_config(&rpk_identity(identity)?, &alpns)
+    polymorph_tls_quic::rpk_server_config(&rpk_identity(identity)?, &alpns)
 }
 
 fn rpk_identity(identity: &Identity) -> Result<RpkIdentity, Error> {

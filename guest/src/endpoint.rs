@@ -1,4 +1,4 @@
-//! The QUIC endpoint pump: quinn-proto driven over a datagram wire — a
+//! The QUIC endpoint pump: noq-proto driven over a datagram wire — a
 //! WebRTC data channel or the relay connection.
 //!
 //! One task drives everything (component-model async is a single-threaded
@@ -18,9 +18,10 @@ use bytes::BytesMut;
 use futures::future::FusedFuture;
 use futures::select_biased;
 use futures::FutureExt;
-use quinn_proto::{
+use noq_proto::{
     ClientConfig, Connection, ConnectionError, ConnectionHandle, DatagramEvent, Dir, Endpoint,
-    EndpointConfig, Event, ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt,
+    EndpointConfig, Event, FourTuple, PathId, ServerConfig, StreamEvent, StreamId, TransportConfig,
+    VarInt,
 };
 
 use crate::bindings::polymorph::webrtc_datachannels::connections::DataChannel;
@@ -29,7 +30,7 @@ use crate::bindings::wasi::clocks::monotonic_clock;
 use iroh_endpoint_core::crypto::sign::Identity;
 use iroh_endpoint_core::relay::RelayConn;
 use iroh_endpoint_core::tls;
-use polymorph_tls_quinn::{QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
+use polymorph_tls_quic::{QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 
 /// The datagram wire QUIC runs over: one datagram per binary message on
 /// either carrier.
@@ -102,7 +103,7 @@ impl Wire<'_> {
     }
 }
 
-/// The wire carries no addresses; quinn still wants distinct,
+/// The wire carries no addresses; noq still wants distinct,
 /// stable socket addresses per side.
 const CLIENT_ADDR: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1111);
@@ -112,7 +113,7 @@ const SERVER_ADDR: SocketAddr =
 /// The spike demo's ALPN protocol.
 const SPIKE_ALPN: &[u8] = b"iroh-spike/0";
 
-/// Timer tick servicing quinn's deadlines (loss detection, idle, pacing).
+/// Timer tick servicing noq's deadlines (loss detection, idle, pacing).
 const TICK_NS: u64 = 50_000_000;
 
 /// Give the final packets (CONNECTION_CLOSE, the server's last ACKs) a
@@ -174,7 +175,7 @@ pub async fn run(
     match &role {
         Role::Client { .. } => {
             let peer = peer_endpoint_id.ok_or("client role requires the peer's endpoint id")?;
-            endpoint = Endpoint::new(endpoint_config()?, None, true, None);
+            endpoint = Endpoint::new(endpoint_config()?, None, true);
             let tls = tls::client_config(identity, peer, vec![SPIKE_ALPN.to_vec()])
                 .map_err(|e| format!("client tls config: {e}"))?;
             let quic_tls = QuicClientConfig::try_from(Arc::new(tls))
@@ -196,7 +197,7 @@ pub async fn run(
             let mut config =
                 ServerConfig::new(Arc::new(quic_tls), Arc::new(TokenKey::new(&token_master)));
             config.transport_config(transport_config());
-            endpoint = Endpoint::new(endpoint_config()?, Some(Arc::new(config)), true, None);
+            endpoint = Endpoint::new(endpoint_config()?, Some(Arc::new(config)), true);
         }
     }
 
@@ -246,7 +247,8 @@ pub async fn run(
 
                 loop {
                     buf.clear();
-                    match conn.poll_transmit(Instant::now(), 1, &mut buf) {
+                    match conn.poll_transmit(Instant::now(), std::num::NonZeroUsize::MIN, &mut buf)
+                    {
                         Some(transmit) => {
                             progressed = true;
                             ok_or_break!('pump, wire.send(&buf[..transmit.size]).await);
@@ -332,11 +334,20 @@ async fn handle_datagram(
 ) -> Result<(), String> {
     let now = Instant::now();
     let remote = match connection {
-        Some((_, conn)) => conn.remote_address(),
+        Some((_, conn)) => conn
+            .network_path(PathId::ZERO)
+            .map(|path| path.remote())
+            .unwrap_or(CLIENT_ADDR),
         None => CLIENT_ADDR,
     };
     buf.clear();
-    match endpoint.handle(now, remote, None, None, BytesMut::from(&datagram[..]), buf) {
+    match endpoint.handle(
+        now,
+        FourTuple::new(remote, None),
+        None,
+        BytesMut::from(&datagram[..]),
+        buf,
+    ) {
         Some(DatagramEvent::ConnectionEvent(handle, event)) => {
             if let Some((ours, conn)) = connection.as_mut() {
                 if *ours == handle {
@@ -400,7 +411,9 @@ impl App {
         started: Instant,
     ) -> Result<(), String> {
         match event {
-            Event::HandshakeDataReady => {}
+            Event::HandshakeDataReady | Event::HandshakeConfirmed => {}
+            // Single-path, no NAT traversal: nothing to act on yet.
+            Event::Path(_) | Event::NatTraversal(_) => {}
             Event::Connected => {
                 self.handshake_ms = Some(started.elapsed().as_millis() as u64);
                 self.peer_id = Some(peer_endpoint_id(conn)?);
@@ -469,7 +482,7 @@ impl App {
                         finished = true;
                         break;
                     }
-                    Err(quinn_proto::ReadError::Blocked) => break,
+                    Err(noq_proto::ReadError::Blocked) => break,
                     Err(e) => return Err(format!("stream read: {e}")),
                 }
             }

@@ -1,4 +1,4 @@
-//! The endpoint surface implementation: quinn-proto state shared between
+//! The endpoint surface implementation: noq-proto state shared between
 //! the exported resources and one detached pump task per bound endpoint.
 //!
 //! Resource methods mutate the shared state directly and wait for the
@@ -26,15 +26,15 @@ use bytes::BytesMut;
 use futures::future::FusedFuture;
 use futures::stream::FuturesUnordered;
 use futures::{select_biased, FutureExt, StreamExt};
-use quinn_proto::{
-    ClientConfig, Connection as QuinnConnection, ConnectionError, ConnectionHandle, DatagramEvent,
-    Dir, Endpoint as QuinnEndpoint, EndpointConfig, Event, FinishError, ReadError, ReadableError,
-    ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt, WriteError,
+use noq_proto::{
+    ClientConfig, Connection as NoqConnection, ConnectionError, ConnectionHandle, DatagramEvent,
+    Dir, Endpoint as NoqEndpoint, EndpointConfig, Event, FinishError, FourTuple, PathId, ReadError,
+    ReadableError, ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt, WriteError,
 };
 
 use iroh_endpoint_core::crypto::sign::Identity;
 use iroh_endpoint_core::tls;
-use polymorph_tls_quinn::{HandshakeData, QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
+use polymorph_tls_quic::{HandshakeData, QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 
 use crate::bindings::exports::polymorph::iroh::endpoint::{
     Connection, Endpoint, EndpointOptions, Guest, GuestConnection, GuestEndpoint, GuestRecvStream,
@@ -51,7 +51,7 @@ use crate::Component;
 use iroh_endpoint_core::relay::RelayConn;
 use wit_bindgen::rt::async_support::StreamReader;
 
-/// The pump's tick: quinn's deadlines, and the bound on how stale a
+/// The pump's tick: noq's deadlines, and the bound on how stale a
 /// resource-method mutation can go unflushed.
 const TICK_NS: u64 = 10_000_000;
 
@@ -76,7 +76,7 @@ fn transport_config() -> Arc<TransportConfig> {
 pub(crate) type Shared = Rc<RefCell<State>>;
 
 pub(crate) struct State {
-    quinn: QuinnEndpoint,
+    noq: NoqEndpoint,
     conns: HashMap<ConnectionHandle, ConnEntry>,
     peer_to_addr: HashMap<[u8; 32], SocketAddr>,
     addr_to_peer: HashMap<SocketAddr, [u8; 32]>,
@@ -117,7 +117,7 @@ pub(crate) struct State {
     /// Inbound signaling payloads (the JSON after the prefix byte),
     /// keyed by the relay-authenticated source. Sessions poll these.
     signal_inboxes: HashMap<[u8; 32], VecDeque<Vec<u8>>>,
-    /// Open channels by id: route targets, not quinn addresses.
+    /// Open channels by id: route targets, not noq addresses.
     channels: HashMap<u32, ChannelEntry>,
     /// Channels registered since the pump last armed receives.
     new_channels: Vec<(u32, Rc<ChannelWire>)>,
@@ -153,7 +153,7 @@ struct ChannelEntry {
 }
 
 struct ConnEntry {
-    conn: QuinnConnection,
+    conn: NoqConnection,
     /// The identity this connection must authenticate as, when one is
     /// known up front: the dialed identity on the client side, the
     /// relay-authenticated datagram source on relay-accepted connections.
@@ -172,7 +172,7 @@ struct ConnEntry {
 }
 
 impl ConnEntry {
-    fn new(conn: QuinnConnection, expected_peer: Option<[u8; 32]>, accepted_side: bool) -> Self {
+    fn new(conn: NoqConnection, expected_peer: Option<[u8; 32]>, accepted_side: bool) -> Self {
         Self {
             conn,
             expected_peer,
@@ -189,9 +189,9 @@ impl ConnEntry {
 }
 
 impl State {
-    fn new(quinn: QuinnEndpoint, webrtc_enabled: bool) -> Self {
+    fn new(noq: NoqEndpoint, webrtc_enabled: bool) -> Self {
         Self {
-            quinn,
+            noq,
             conns: HashMap::new(),
             peer_to_addr: HashMap::new(),
             addr_to_peer: HashMap::new(),
@@ -220,7 +220,7 @@ impl State {
     }
 
     /// The stable synthetic socket address standing in for `peer` (the
-    /// relay and channel wires have no addresses; quinn wants one
+    /// relay and channel wires have no addresses; noq wants one
     /// distinct, stable address per peer, whichever wire carries the
     /// packets). Drawn from `2001:db8:77::/48` — the IPv6 documentation
     /// prefix is never routable, so no real peer address can collide
@@ -290,7 +290,7 @@ impl State {
     }
 
     /// Register an open channel to `peer` and move the peer's route
-    /// onto it: quinn keeps addressing the peer's standin while the
+    /// onto it: noq keeps addressing the peer's standin while the
     /// packets change wire. The pump arms the channel's receive on its
     /// next turn. A closing endpoint refuses and closes the wire.
     pub(crate) fn register_channel(
@@ -348,7 +348,7 @@ impl State {
     fn drain(&mut self) {
         let now = Instant::now();
         let State {
-            quinn,
+            noq,
             conns,
             addr_to_peer,
             accept_queue,
@@ -365,7 +365,7 @@ impl State {
 
                 while let Some(event) = entry.conn.poll_endpoint_events() {
                     progressed = true;
-                    if let Some(back) = quinn.handle_event(*handle, event) {
+                    if let Some(back) = noq.handle_event(*handle, event) {
                         entry.conn.handle_event(back);
                     }
                 }
@@ -377,7 +377,10 @@ impl State {
 
                 loop {
                     buf.clear();
-                    match entry.conn.poll_transmit(now, 1, &mut buf) {
+                    match entry
+                        .conn
+                        .poll_transmit(now, std::num::NonZeroUsize::MIN, &mut buf)
+                    {
                         Some(transmit) => {
                             progressed = true;
                             let datagram = buf[..transmit.size].to_vec();
@@ -420,7 +423,7 @@ impl State {
         self.handle_datagram(remote, None, payload);
     }
 
-    /// A datagram from a channel enters quinn under the peer's standin
+    /// A datagram from a channel enters noq under the peer's standin
     /// — the same address the relay wire uses, so an upgraded
     /// connection sees one unbroken path — attributed to the
     /// signaling-authenticated peer.
@@ -439,10 +442,9 @@ impl State {
     fn handle_datagram(&mut self, addr: SocketAddr, source: Option<[u8; 32]>, payload: Vec<u8>) {
         let now = Instant::now();
         let mut buf = Vec::new();
-        match self.quinn.handle(
+        match self.noq.handle(
             now,
-            addr,
-            None,
+            FourTuple::new(addr, None),
             None,
             BytesMut::from(&payload[..]),
             &mut buf,
@@ -457,7 +459,7 @@ impl State {
                     return;
                 }
                 buf.clear();
-                match self.quinn.accept(incoming, now, &mut buf, None) {
+                match self.noq.accept(incoming, now, &mut buf, None) {
                     Ok((handle, conn)) => {
                         self.conns
                             .insert(handle, ConnEntry::new(conn, source, true));
@@ -524,7 +526,9 @@ fn on_event(
     accept_queue: &mut VecDeque<ConnectionHandle>,
 ) {
     match event {
-        Event::HandshakeDataReady => {}
+        Event::HandshakeDataReady | Event::HandshakeConfirmed => {}
+        // Single-path, no NAT traversal: nothing to act on yet.
+        Event::Path(_) | Event::NatTraversal(_) => {}
         Event::Connected => {
             let session = entry.conn.crypto_session();
             if let Some(hd) = session
@@ -590,7 +594,7 @@ fn on_event(
     }
 }
 
-/// The endpoint's I/O task: relayed datagrams in and out, quinn's timers,
+/// The endpoint's I/O task: relayed datagrams in and out, noq's timers,
 /// and the flush after every kick. The two long-lived import futures stay
 /// pinned across iterations and are resolved before the task returns (an
 /// in-flight import is a component-model subtask; jco traps on cancelling
@@ -1059,11 +1063,10 @@ impl GuestEndpoint for EndpointRes {
             Arc::new(TokenKey::new(&token_master)),
         );
         server_config.transport_config(transport_config());
-        let quinn = QuinnEndpoint::new(
+        let noq = NoqEndpoint::new(
             Arc::new(EndpointConfig::new(Arc::new(ResetKey::new(&reset_key)))),
             Some(Arc::new(server_config)),
             true,
-            None,
         );
 
         let udp = match &options.udp_bind_addr {
@@ -1073,7 +1076,7 @@ impl GuestEndpoint for EndpointRes {
             None => None,
         };
 
-        let shared = Rc::new(RefCell::new(State::new(quinn, options.webrtc)));
+        let shared = Rc::new(RefCell::new(State::new(noq, options.webrtc)));
         // The home relay takes pool key HOME_RELAY; the pump arms its
         // receive on the first turn.
         shared
@@ -1135,7 +1138,7 @@ impl GuestEndpoint for EndpointRes {
             }
         }
 
-        // Resolve pool keys before quinn dials; opening a foreign relay
+        // Resolve pool keys before noq dials; opening a foreign relay
         // awaits its websocket and relay handshake.
         let dial_key = match (&direct, &dial_relay) {
             (None, Some(url)) => self.ensure_relay(url).await?,
@@ -1171,13 +1174,13 @@ impl GuestEndpoint for EndpointRes {
                 }
             };
             let (handle, conn) = st
-                .quinn
+                .noq
                 .connect(Instant::now(), config, remote, tls::SERVER_NAME)
                 .map_err(|e| Error::ConnectFailed(e.to_string()))?;
             st.conns
                 .insert(handle, ConnEntry::new(conn, Some(peer), false));
             // The upgrade dance overlaps the handshake; the route flip
-            // is invisible to quinn (same standin address).
+            // is invisible to noq (same standin address).
             if let Some(key) = upgrade_key {
                 st.pending_upgrades.push((peer, key));
             }
@@ -1307,7 +1310,13 @@ impl GuestConnection for ConnectionRes {
         let Some(entry) = st.conns.get(&self.handle) else {
             return PathKind::Relay;
         };
-        match st.routes.get(&entry.conn.remote_address()) {
+        // Wire moves are route flips under a stable standin address, so
+        // the connection's one path (multipath is never negotiated) keys
+        // the route table.
+        let Ok(path) = entry.conn.network_path(PathId::ZERO) else {
+            return PathKind::Relay;
+        };
+        match st.routes.get(&path.remote()) {
             Some(RouteWire::Channel(_)) => PathKind::Webrtc,
             Some(RouteWire::Relay(_)) => PathKind::Relay,
             // Real addresses are never in the route table.

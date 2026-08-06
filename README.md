@@ -21,7 +21,7 @@ deliberately swappable bottom:
 
 - **Transport** carries encrypted bytes: UDP by default, relay as
   fallback, explicitly pluggable (Tor, Nym, Bluetooth exist upstream).
-- **QUIC + TLS 1.3** (upstream: quinn + rustls) provides end-to-end
+- **QUIC + TLS 1.3** (upstream: noq + rustls) provides end-to-end
   encryption, authentication, and stream multiplexing. Node identity is an
   Ed25519 key; TLS authenticates raw public keys, so the key *is* the
   address (`EndpointID`).
@@ -42,11 +42,11 @@ project: it is the seam where the browser gets a real peer-to-peer path.
 
 ### Port the protocol, not the crate
 
-Compiling iroh itself (quinn, tokio, rustls) to a component target is the
-wrong shape: tokio's WASI support is partial, quinn assumes OS sockets,
+Compiling iroh itself (noq, tokio, rustls) to a component target is the
+wrong shape: tokio's WASI support is partial, noq's socket layer is tokio-coupled,
 and iroh's existing browser build targets wasm-bindgen, not components.
 Instead, the endpoint layer is reimplemented around a **sans-I/O QUIC
-core** (`quinn-proto` is already sans-I/O), driven by a component-model
+core** (`noq-proto` is already sans-I/O), driven by a component-model
 async pump, with transports and crypto injected through WIT — the same
 pattern as the webrtc sibling's in-guest provider, which drives the
 sans-I/O `rtc` stack over `wasi:sockets`. Iroh's *wire formats* (discovery
@@ -81,9 +81,9 @@ over WebSocket, no direct connections) can do.
 
 `polymorph:webcrypto` serves **identity**; everything else runs **in-guest**
 under the [`polymorph:tls`](https://github.com/polymorph-components/polymorph-tls) sibling's
-wasm timing-class profile (its `polymorph-tls-quinn` crate — ChaCha20-Poly1305
+wasm timing-class profile (its `polymorph-tls-quic` crate — ChaCha20-Poly1305
 preferred, fixsliced AES-128-GCM for conformance, RFC 9001 packet
-protection, quinn session glue). Specifically:
+protection, noq session glue). Specifically:
 
 - Node identity (Ed25519 signing) and discovery-record signing go through
   the WIT surface: the identity key is a *non-extractable* handle — in the
@@ -145,9 +145,9 @@ transport profile (issue #1), and speaking iroh's relay wire protocol to
 an unmodified upstream relay (issue #2) — exercising both wires the
 design names, a WebRTC data channel and the relay connection itself.
 
-- **One guest component** (`guest/`, `wasm32-wasip2`): `quinn-proto`
+- **One guest component** (`guest/`, `wasm32-wasip2`): `noq-proto`
   with default features off over the `polymorph:tls` sibling's
-  `polymorph-tls-quinn` crypto layer, implementing the crypto split —
+  `polymorph-tls-quic` crypto layer, implementing the crypto split —
   key exchange, peer verification, the key schedule, and record/packet
   protection run in-guest under the wasm timing-class profile, while
   Ed25519 identity signing goes through `polymorph:webcrypto` (the

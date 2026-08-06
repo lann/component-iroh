@@ -7,7 +7,7 @@
 //! The crypto split, amended after `polymorph:tls` landed: identity signing
 //! goes through `polymorph:webcrypto` (the key is a non-extractable handle);
 //! key exchange, verification, the key schedule, and record/packet
-//! protection run in-guest via `polymorph-tls-quinn`'s wasm timing-class
+//! protection run in-guest via `polymorph-tls-quic`'s wasm timing-class
 //! profile. Modules that reach a WIT import are wasm-only; relay framing
 //! compiles natively for its known-answer tests.
 
