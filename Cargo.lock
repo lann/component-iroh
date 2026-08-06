@@ -2616,8 +2616,10 @@ dependencies = [
  "polymorph-tls-profile",
  "polymorph-tls-quinn",
  "polymorph-webcrypto-guest",
+ "postcard",
  "rustls",
  "rustls-pki-types",
+ "serde",
  "wit-bindgen 0.59.0",
 ]
 
