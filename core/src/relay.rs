@@ -12,8 +12,8 @@ use std::collections::VecDeque;
 
 use crate::bindings::polymorph::websocket::connections::Websocket;
 use crate::bindings::polymorph::websocket::types::Message as WsMessage;
-use iroh_endpoint_core::crypto::sign::Identity;
-use iroh_endpoint_core::relay_frames::{self as frames, tag};
+use crate::crypto::sign::Identity;
+use crate::relay_frames::{self as frames, tag};
 
 /// A connected, authenticated relay client.
 pub struct RelayConn {

@@ -43,6 +43,7 @@ clippy:
 
 validate-wit:
     wasm-tools component wit wit/ > /dev/null
+    wasm-tools component wit core/wit/ > /dev/null
     wasm-tools component wit guest/wit/ > /dev/null
     wasm-tools component wit endpoint-demo/wit/ > /dev/null
     wasm-tools component wit experiments/exec-model/wit/ > /dev/null

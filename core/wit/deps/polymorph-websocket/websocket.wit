@@ -1,0 +1,288 @@
+package polymorph:websocket@0.1.0;
+
+/// Shared structural types for the WebSocket client interfaces.
+///
+/// Every non-resource type used by the package lives here. Structural types
+/// carry no host-side identity, so a single composition can freely share
+/// these definitions across multiple components. The stateful object — the
+/// `websocket` resource — lives in the separate `connections` interface,
+/// since a resource is always owned by the one component that implements it.
+///
+/// Package-wide contracts (streaming, inbound buffering, close semantics,
+/// the error contract) live in this package's `README.md` and are referenced
+/// from item docs by section name.
+interface types {
+    /// Errors surfaced by WebSocket connections.
+    ///
+    /// See `README.md`, "Error contract": the `string` payloads are
+    /// human-readable diagnostics for logging. Do not match on their
+    /// contents, and do not expect them to be non-empty — some
+    /// implementations cannot observe failure details.
+    variant error {
+        /// The supplied URL is not an absolute `ws:` or `wss:` URL without a
+        /// fragment. `connections.websocket.connect` fails with this eagerly,
+        /// before any network activity.
+        invalid-url(string),
+        /// The connection attempt failed: name resolution, TCP, TLS, or the
+        /// HTTP upgrade handshake (including a server whose subprotocol
+        /// selection violates the offer — see
+        /// `connections.websocket.connect`). The diagnostic detail is
+        /// implementation-defined and may be empty — see `README.md`,
+        /// "Portability contract".
+        connect-failed(string),
+        /// The connection was closed before the operation completed. Close
+        /// details are deliberately not carried here: await
+        /// `connections.websocket.wait-closed` for the peer's close frame,
+        /// if any. See `README.md`, "Close contract".
+        closed,
+        /// The connection's inbound messages are being consumed by
+        /// `connections.websocket.receive-via-stream`. Once that method has
+        /// been called on a connection, any further call to it or to
+        /// `receive` fails with this error.
+        receiving-via-stream,
+        /// The connection's bounded inbound buffer overflowed because
+        /// messages arrived faster than the guest received them. The
+        /// connection is closed; messages buffered before the overflow
+        /// remain receivable, after which `receive` fails with this error.
+        /// See `README.md`, "Inbound buffering".
+        receive-buffer-overflow,
+        /// A supplied argument is invalid: a close code outside the range a
+        /// client may send, an oversized or code-less close reason, or a
+        /// malformed subprotocol offer. The operation had no effect. The
+        /// string carries a human-readable reason.
+        invalid-argument(string),
+        /// An implementation-specific failure. The string is human-readable.
+        other(string),
+    }
+
+    /// A single WebSocket message.
+    ///
+    /// Each message preserves a WebSocket message boundary. A message is
+    /// either binary or text; a text message is carried as a `string`,
+    /// whose bytes are valid UTF-8.
+    variant message {
+        /// A binary message, carried verbatim.
+        binary(list<u8>),
+        /// A text message. The `string` is valid UTF-8.
+        %string(string),
+    }
+
+    /// The kind of a `stream-message`.
+    enum message-kind {
+        /// A binary message.
+        binary,
+        /// A text message. The corresponding `stream-message.data` payload
+        /// must be valid UTF-8.
+        %string,
+    }
+
+    /// A single WebSocket message whose payload is carried as a byte
+    /// `stream` rather than materialized as a `list<u8>` or `string`.
+    ///
+    /// The bytes streamed through `data` MUST match `kind` (valid UTF-8 when
+    /// `kind` is `string`) and MUST total exactly `length` bytes. See
+    /// `README.md`, "Streaming contract".
+    record stream-message {
+        /// Whether the payload is binary or UTF-8 text.
+        kind: message-kind,
+        /// The total length, in bytes, of the payload carried by `data`.
+        length: u32,
+        /// The message payload.
+        data: stream<u8>,
+    }
+
+    /// The failure returned by `connections.websocket.send-via-stream`.
+    ///
+    /// `sent` reports how many complete messages were handed to the
+    /// transport before `error` occurred, so the caller can tell where the
+    /// stream stopped.
+    record send-via-stream-error {
+        /// The failure that stopped the stream.
+        error: error,
+        /// The number of messages sent before `error` occurred.
+        sent: u64,
+    }
+
+    /// The contents of a received WebSocket close frame (RFC 6455 section
+    /// 5.5.1).
+    ///
+    /// A `close-info` exists only when the peer actually sent a close frame:
+    /// an abnormally dropped connection has none, and implementations never
+    /// invent one. See `README.md`, "Close contract".
+    record close-info {
+        /// The close code carried by the frame, or 1005 if the frame carried
+        /// no code.
+        code: u16,
+        /// The close reason carried by the frame; empty if none.
+        reason: string,
+    }
+
+    /// The lifecycle state of a `connections.websocket`, mirroring the W3C
+    /// `WebSocket.readyState` values reachable after a successful connect.
+    /// Reported by `connections.websocket.state`.
+    enum websocket-state {
+        /// The connection is open: `send` and `receive` operate normally.
+        open,
+        /// A closing handshake is in progress.
+        closing,
+        /// The connection is closed. Terminal.
+        closed,
+    }
+}
+
+/// The stateful WebSocket resource.
+///
+/// The `websocket` resource carries host-side identity and is owned by the
+/// single component that implements it, so — unlike the structural `types`
+/// — it cannot be shared across a composition.
+///
+/// This surface is client-only: it opens outbound connections. It is bounded
+/// by the capabilities of the standard browser `WebSocket` API, so it
+/// exposes no request headers, client certificates, proxy control, TLS
+/// trust decisions, or ping/pong access. See `README.md`, "Portability
+/// contract".
+interface connections {
+    use types.{
+        error,
+        message,
+        stream-message,
+        send-via-stream-error,
+        close-info,
+        websocket-state,
+    };
+
+    /// A connected WebSocket client connection.
+    ///
+    /// A `websocket` is bidirectional and message-oriented. Each
+    /// `send`/`receive` carries exactly one WebSocket message, preserving
+    /// message boundaries. Concurrent calls are supported so the host and
+    /// guest can pipeline messages and let the async ABI apply
+    /// backpressure. A message may be carried as a whole `message` value
+    /// or, to bound in-memory buffering, as a `stream-message` whose
+    /// payload flows through a byte `stream` (see `README.md`, "Streaming
+    /// contract").
+    ///
+    /// There is no wire-level inbound backpressure: inbound messages are
+    /// buffered up to an implementation-defined bound, and overflowing it
+    /// closes the connection — the buffered backlog stays receivable, then
+    /// `receive` fails `error.receive-buffer-overflow`. See `README.md`,
+    /// "Inbound buffering", for the full contract.
+    resource websocket {
+        /// Open a WebSocket connection.
+        ///
+        /// `url` must be an absolute `ws:` or `wss:` URL without a fragment;
+        /// anything else fails `invalid-url` eagerly. `protocols` is the
+        /// subprotocol offer, possibly empty; a malformed offer (an invalid
+        /// token, or a duplicate entry) fails `invalid-argument` eagerly.
+        ///
+        /// The returned future resolves once the WebSocket handshake has
+        /// completed and the connection is open, or with `connect-failed`
+        /// if it could not be established. A non-empty offer binds the
+        /// server: the connection fails if the server selects a subprotocol
+        /// that was not offered, or selects none at all. The connect attempt
+        /// is bounded: implementations fail `connect-failed` after an
+        /// implementation-defined timeout.
+        connect: static async func(url: string, protocols: list<string>) -> result<websocket, error>;
+
+        /// The subprotocol the server selected, or the empty string if none
+        /// was negotiated. The value is fixed for the life of the
+        /// connection.
+        protocol: func() -> string;
+
+        /// Send a single message on the connection. The returned future
+        /// resolves once the message has been handed to the transport, or
+        /// with an `error` if the connection closed early. Sending after a
+        /// close was initiated (locally or by the peer) fails with
+        /// `error.closed` — messages are never silently discarded.
+        ///
+        /// Concurrent calls to `send` must be supported; concurrently sent
+        /// messages are handed to the transport in an
+        /// implementation-defined order.
+        send: async func(message: message) -> result<_, error>;
+
+        /// Receive a single message from the connection. The returned
+        /// future resolves with the next inbound message, or with an
+        /// `error` (such as `closed`, or `receive-buffer-overflow` if the
+        /// bounded inbound buffer overflowed — see the resource docs) when
+        /// the connection closes. See `README.md`, "Close contract", for
+        /// exactly what `receive` returns around a close.
+        ///
+        /// Concurrent calls to `receive` must be supported; concurrently
+        /// pending receivers are each handed a message in an
+        /// implementation-defined order.
+        receive: async func() -> result<message, error>;
+
+        /// Send a stream of messages whose payloads are each streamed as
+        /// bytes. Every element of `messages` is one WebSocket message,
+        /// preserving message boundaries; the bytes streamed through each
+        /// element's `data` MUST match its `kind` (valid UTF-8 when `kind`
+        /// is `string`) and MUST total exactly its `length` bytes. The
+        /// returned future resolves once the input stream is exhausted and
+        /// every message has been handed to the transport, or with a
+        /// `send-via-stream-error` if the connection closed early. The
+        /// error's `sent` field reports how many messages were handed to
+        /// the transport before the failure.
+        ///
+        /// Concurrent calls must be supported; concurrently sent messages
+        /// are handed to the transport in an implementation-defined order.
+        send-via-stream: async func(messages: stream<stream-message>) -> result<_, send-via-stream-error>;
+
+        /// Take over the connection's inbound messages, delivering each as
+        /// a `stream-message` whose payload is a byte `stream`. One
+        /// `stream-message` is produced per received WebSocket message; the
+        /// returned stream ends (its reader is dropped) when the connection
+        /// closes (including a close caused by an inbound buffer overflow —
+        /// see the resource docs).
+        ///
+        /// This method may only be called once per connection. Once it has
+        /// been called, any further call to it or to `receive` returns
+        /// `error.receiving-via-stream`. Calls to `receive` that are
+        /// pending when this method is called fail with
+        /// `error.receiving-via-stream`: a pending receive is never handed
+        /// a message once the stream is claimed.
+        receive-via-stream: func() -> result<stream<stream-message>, error>;
+
+        /// The connection's current lifecycle state.
+        ///
+        /// `closed` is terminal and latched: once reported, every later
+        /// call reports it too. Whether `closing` is ever observable is
+        /// implementation- and timing-defined — a locally initiated close
+        /// passes through it observably; a remote close may not (see
+        /// `README.md`, "Portability contract"). To wait for the close
+        /// rather than poll for it, use `wait-closed`.
+        state: func() -> websocket-state;
+
+        /// Resolve once the connection is closed, with the contents of the
+        /// peer's close frame if one was received — including the peer's
+        /// acknowledgement of a locally initiated close — or `none` if the
+        /// connection ended without a peer close frame (an abnormal
+        /// closure). See `README.md`, "Close contract".
+        ///
+        /// The result is **latched**: once the connection is closed this
+        /// resolves immediately with the same value, and may be awaited any
+        /// number of times, before or after the close.
+        wait-closed: async func() -> option<close-info>;
+
+        /// Close the connection.
+        ///
+        /// Deliberately synchronous, matching the W3C `WebSocket.close()`:
+        /// it initiates the closing handshake and returns; await
+        /// `wait-closed` for completion. Idempotent: closing an
+        /// already-closing or closed connection succeeds and is a no-op.
+        ///
+        /// Argument validation is eager and uniform: `code` must be 1000 or
+        /// in 3000-4999 (the codes a browser client may send — see
+        /// `README.md`, "Portability contract"); `reason` must be at most
+        /// 123 bytes of UTF-8 and requires a `code`. A violation fails
+        /// `invalid-argument` and the connection is unaffected. `none`
+        /// sends a close frame with no code, which the peer observes as
+        /// code 1005.
+        ///
+        /// The close is observed locally at once, unread messages are
+        /// discarded, and the whole closing procedure is bounded — see
+        /// `README.md`, "Close contract", for what every operation
+        /// observes around it. Dropping the resource without calling
+        /// `close` implies `close(none, "")`.
+        close: func(code: option<u16>, reason: string) -> result<_, error>;
+    }
+}

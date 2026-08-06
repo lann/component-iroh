@@ -13,23 +13,20 @@ pub(crate) mod bindings {
         path: "wit",
         world: "iroh-spike",
         generate_all,
-        // The websocket streaming methods are unused here and cannot
-        // currently be generated alongside the webrtc package: the two
-        // packages' `stream-message` records are structurally equal, and
-        // wit-bindgen 0.59 canonicalizes stream payloads by structure
-        // while still generating one Rust type per interface, so only one
-        // of the two gets its `StreamPayload` impl.
-        skip: [
-            "[method]websocket.send-via-stream",
-            "[method]websocket.receive-via-stream",
-        ],
+        // The websocket interfaces are bound once in iroh-endpoint-core,
+        // whose relay client this component shares; webrtc's structurally
+        // equal `stream-message` is then the only stream payload generated
+        // in this crate — two in one generation collide under wit-bindgen
+        // 0.59's structural canonicalization of stream payloads.
+        with: {
+            "polymorph:websocket/types@0.1.0": iroh_endpoint_core::bindings::polymorph::websocket::types,
+            "polymorph:websocket/connections@0.1.0": iroh_endpoint_core::bindings::polymorph::websocket::connections,
+        },
     });
 }
 
 #[cfg(target_arch = "wasm32")]
 mod endpoint;
-#[cfg(target_arch = "wasm32")]
-mod relay;
 
 #[cfg(target_arch = "wasm32")]
 mod demo {
@@ -48,8 +45,8 @@ mod demo {
         DataChannelState, IceCandidate, SdpType, SessionDescription,
     };
     use crate::endpoint;
-    use crate::relay::RelayConn;
     use iroh_endpoint_core::crypto::sign::Identity;
+    use iroh_endpoint_core::relay::RelayConn;
 
     pub struct Component;
 

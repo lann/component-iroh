@@ -2593,7 +2593,6 @@ dependencies = [
 name = "iroh-endpoint"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "bytes",
  "futures",
  "getrandom 0.4.3",
@@ -2612,6 +2611,7 @@ dependencies = [
 name = "iroh-endpoint-core"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "hex",
  "polymorph-tls-profile",
  "polymorph-tls-quinn",
@@ -2723,7 +2723,6 @@ dependencies = [
 name = "iroh-spike-guest"
 version = "0.0.1"
 dependencies = [
- "blake3",
  "bytes",
  "futures",
  "getrandom 0.4.3",

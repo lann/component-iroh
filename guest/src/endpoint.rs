@@ -26,8 +26,8 @@ use quinn_proto::{
 use crate::bindings::polymorph::webrtc_datachannels::connections::DataChannel;
 use crate::bindings::polymorph::webrtc_datachannels::types::Message as ChannelMessage;
 use crate::bindings::wasi::clocks::monotonic_clock;
-use crate::relay::RelayConn;
 use iroh_endpoint_core::crypto::sign::Identity;
+use iroh_endpoint_core::relay::RelayConn;
 use iroh_endpoint_core::tls;
 use polymorph_tls_quinn::{QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 

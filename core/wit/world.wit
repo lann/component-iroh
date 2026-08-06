@@ -1,0 +1,9 @@
+package polymorph:iroh-core@0.0.1;
+
+/// The imports behind `iroh-endpoint-core`'s wasm-only modules. Not a
+/// component world: it exists so the shared library binds its imported
+/// interfaces once, and the components remap their worlds' matching
+/// imports onto that binding (`with` in their `generate!`).
+world core-imports {
+    import polymorph:websocket/connections@0.1.0;
+}
