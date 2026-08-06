@@ -5,11 +5,12 @@ name = "iroh-relay-ws-guest"
 version = "0.0.1"
 edition = "2021"
 publish = false
-description = "Spike: upstream iroh (v1.0.3, unmodified) on wasm32-wasip2, relay-only, with the relay websocket bridged through polymorph-websocket via the synthetic-datagram wake pattern"
+description = "Spike: upstream iroh (main, unmodified) on wasm32-wasip2 — relay over polymorph-websocket plus WebRTC data channels as a CustomTransport, both through the synthetic-datagram wake pattern"
 
 [dependencies]
-iroh = { git = "https://github.com/n0-computer/iroh.git", rev = "735958f81e9aa5868a2118db6195b33179e33cd0", default-features = false, features = ["tls-ring"] }
-n0-error = "1"
+iroh = { git = "https://github.com/n0-computer/iroh.git", rev = "735958f81e9aa5868a2118db6195b33179e33cd0", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh-base = "1.0.3"
+noq-udp = { version = "1.1.0", default-features = false }
 n0-watcher = "1"
 tokio = { version = "1.53", default-features = false, features = ["rt", "macros", "time", "sync", "io-util"] }
 tracing = "0.1"

@@ -14,7 +14,7 @@
 // connection = one synthetic socket = one websocket).
 
 import { Websocket } from "../../../.deps/websocket/js/jco/websocket.js";
-import { onDatagramSent, pushDatagram } from "./shim.mjs";
+import { registerBridge, pushDatagram } from "./shim.mjs";
 
 const TAG_CONTROL = 0x00;
 const TAG_MESSAGE = 0x01;
@@ -64,7 +64,7 @@ async function open(socket, url, protocols) {
   }
 }
 
-onDatagramSent((socket, { data }) => {
+registerBridge(1, (socket, { data }) => {
   if (data.length === 0) return;
   const tag = data[0];
   const payload = data.subarray(1);

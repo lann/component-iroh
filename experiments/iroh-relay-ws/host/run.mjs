@@ -5,6 +5,7 @@
 import { performance } from "node:perf_hooks";
 import { stats } from "./shim.mjs";
 import { bridgeStats } from "./bridge.mjs";
+import { webrtcStats } from "./webrtc-bridge.mjs";
 
 const WATCHDOG_MS = Number(process.env.WATCHDOG_MS ?? 120_000);
 
@@ -25,5 +26,10 @@ console.log(
   `[driver] done in ${((performance.now() - t0) / 1000).toFixed(1)}s; ` +
     `polls=${stats.pollCalls} (suspended ${stats.pollSuspends}) ` +
     `datagrams in/out=${stats.datagramsIn}/${stats.datagramsOut} ` +
-    `ws connections=${bridgeStats.connections} ws msgs in/out=${bridgeStats.wsIn}/${bridgeStats.wsOut}`,
+    `ws connections=${bridgeStats.connections} ws msgs in/out=${bridgeStats.wsIn}/${bridgeStats.wsOut} ` +
+    `webrtc channels=${webrtcStats.channelsOpened} msgs in/out=${webrtcStats.in}/${webrtcStats.out} ` +
+    `dropped-connecting=${webrtcStats.droppedWhileConnecting}`,
 );
+
+// The webrtc peer connections hold the event loop open; the guest is done.
+process.exit(0);

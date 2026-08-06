@@ -238,24 +238,26 @@ const theNetwork = new Network();
 export const network = { Network };
 export const instanceNetwork = { instanceNetwork: () => theNetwork };
 
-/** The bridge's well-known synthetic address (see datagram_pipe.rs). */
+/** The relay-ws bridge's well-known synthetic address (see datagram_pipe.rs). */
 export const BRIDGE_ADDR = {
   tag: "ipv4",
   val: { port: 1, address: [127, 0, 0, 1] },
 };
 
 let nextEphemeralPort = 0xc000;
-let datagramSentListener = null;
 
-/** Bridge hook: observe every guest-sent datagram, with its socket. */
-export function onDatagramSent(cb) {
-  datagramSentListener = cb;
+/** Bridges by well-known destination port (1 = relay ws, 2 = webrtc). */
+const bridges = new Map();
+
+/** Bridge hook: claim every guest datagram sent to the given port. */
+export function registerBridge(port, cb) {
+  bridges.set(port, cb);
 }
 
-/** Bridge hook: deliver a datagram (from the bridge address) to a socket. */
-export function pushDatagram(socket, bytes) {
+/** Bridge hook: deliver a datagram to a socket, from the given address. */
+export function pushDatagram(socket, bytes, fromAddr = BRIDGE_ADDR) {
   stats.datagramsIn++;
-  socket.queue.push({ data: bytes, remoteAddress: BRIDGE_ADDR });
+  socket.queue.push({ data: bytes, remoteAddress: fromAddr });
   socket.arrived();
 }
 
@@ -289,7 +291,13 @@ class OutgoingDatagramStream {
   send(datagrams) {
     for (const d of datagrams) {
       stats.datagramsOut++;
-      if (datagramSentListener) datagramSentListener(this.#sock, d);
+      const port = d.remoteAddress?.val?.port;
+      const bridge = bridges.get(port);
+      if (bridge) {
+        bridge(this.#sock, d);
+      } else {
+        console.error(`[shim] datagram to unbridged port ${port}; dropping`);
+      }
     }
     return BigInt(datagrams.length);
   }
