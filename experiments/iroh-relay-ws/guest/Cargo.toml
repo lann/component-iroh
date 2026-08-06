@@ -15,13 +15,21 @@ tokio = { version = "1.53", default-features = false, features = ["rt", "macros"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# The four wasi enablement patches (see vendor/*/): noq-udp routes wasi to
-# its posix_minimal impl (socket2 send_to/recv_from — functional, not a
-# stub); netwatch routes wasi to its netdev-free posix_minimal branch;
-# iroh-dns tolerates the missing system resolver config; iroh-relay gains
-# a wasi connect() that rides a datagram pipe instead of dialing TCP.
+# The wasi enablement patches. noq-udp's fix is upstream but unreleased
+# (n0-computer/noq#773, merged 2026-07-27; the published 1.1.1 was cut
+# from a pre-merge base), so it comes from the pinned upstream rev — and
+# because released noq 1.1.1 requires noq-udp ^1.1.1 while the git tree
+# identifies as 1.1.0, noq and noq-proto must ride the same rev to keep
+# one coherent noq-udp in the graph. The vendored copies (see vendor/*/)
+# carry this spike's own patches, none of which exist upstream: netwatch
+# routes wasi to its netdev-free posix_minimal branch; iroh-dns tolerates
+# the missing system resolver config; iroh-relay gains a wasi connect()
+# that rides a datagram pipe instead of dialing TCP; iroh short-circuits
+# the net_report HTTPS relay probe that gates home-relay selection.
 [patch.crates-io]
-noq-udp = { path = "../vendor/noq-udp" }
+noq = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
+noq-proto = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
+noq-udp = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
 netwatch = { path = "../vendor/netwatch" }
 iroh-dns = { path = "../vendor/iroh-dns" }
 iroh-relay = { path = "../vendor/iroh-relay" }
