@@ -3953,6 +3953,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-rustcrypto",
  "sha2 0.11.0",
+ "subtle",
 ]
 
 [[package]]
