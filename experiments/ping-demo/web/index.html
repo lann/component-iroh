@@ -1,0 +1,75 @@
+<!doctype html>
+<!-- Ping demo: two browsers, one iroh connection — relay-bootstrapped,
+     live-migrated onto a WebRTC data channel (polymorph-iroh PR #25,
+     issue #26). The service worker injects COOP/COEP (GitHub Pages
+     cannot set headers) for cross-origin isolation: 5us timers for the
+     RTT readout. Everything is same-origin, so isolation blocks nothing. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>iroh ping — polymorph components</title>
+    <script src="./vendor/coi-serviceworker.js"></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+        color: #ccc;
+        font: 14px/1.4 system-ui, sans-serif;
+        overflow: hidden;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+      }
+      #status {
+        position: fixed;
+        top: 8px;
+        left: 0;
+        right: 0;
+        text-align: center;
+        color: #888;
+        pointer-events: none;
+      }
+      #view {
+        border-radius: 6px;
+        touch-action: none;
+        cursor: crosshair;
+      }
+      #qrbox {
+        position: fixed;
+        inset: 0;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: rgba(0, 0, 0, 0.85);
+      }
+      #qr {
+        image-rendering: pixelated;
+        border-radius: 4px;
+      }
+      #link {
+        color: #6cf;
+        max-width: 90vw;
+        overflow-wrap: anywhere;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">loading…</div>
+    <canvas id="view"></canvas>
+    <div id="qrbox">
+      <canvas id="qr"></canvas>
+      <a id="link" href="#" target="_blank" rel="noreferrer"></a>
+    </div>
+    <script type="module" src="./demo.mjs"></script>
+  </body>
+</html>

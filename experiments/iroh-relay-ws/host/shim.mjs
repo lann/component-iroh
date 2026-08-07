@@ -182,11 +182,15 @@ export const stderr = { getStderr: () => stderrStream, OutputStream };
 export const environment = {
   // RUST_LOG passes through so guest tracing is steerable from the driver:
   // the process environment under Node, `globalThis.RUST_LOG` in a browser.
+  // `globalThis.GUEST_ENV` (an object) supplies further guest variables —
+  // the ping demo passes its role and peer through it.
   getEnvironment: () => {
+    const env = Object.entries(globalThis.GUEST_ENV ?? {});
     const rustLog =
       (typeof process !== "undefined" && process.env?.RUST_LOG) ||
       globalThis.RUST_LOG;
-    return rustLog ? [["RUST_LOG", rustLog]] : [];
+    if (rustLog) env.push(["RUST_LOG", rustLog]);
+    return env;
   },
   getArguments: () => ["iroh-relay-ws-guest"],
   initialCwd: () => undefined,

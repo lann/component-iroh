@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "ping-demo-guest"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Ping-demo guest: one upstream-iroh endpoint per page, frame ferry between the page and the peer over a relay-bootstrapped connection that live-migrates onto a WebRTC data channel via the synthetic-address overlay"
+
+[dependencies]
+iroh = { git = "https://github.com/n0-computer/iroh.git", rev = "735958f81e9aa5868a2118db6195b33179e33cd0", default-features = false, features = ["tls-ring"] }
+tokio = { version = "1.53", default-features = false, features = ["rt", "macros", "time", "sync", "io-util", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Same wasi enablement patches as the iroh-relay-ws spike, riding the
+# same vendored copies (see that Cargo.toml for the full rationale).
+[patch."https://github.com/n0-computer/iroh.git"]
+iroh = { path = "../../iroh-relay-ws/vendor/iroh" }
+
+[patch.crates-io]
+noq = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
+noq-proto = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
+noq-udp = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
+netwatch = { path = "../../iroh-relay-ws/vendor/netwatch" }
+
+[profile.release]
+lto = true
+opt-level = "s"

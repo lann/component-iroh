@@ -13,3 +13,5 @@ node_modules
 /experiments/udp-wake/host/generated-composed
 /experiments/iroh-relay-ws/guest/target
 /experiments/iroh-relay-ws/host/generated
+/experiments/ping-demo/guest/target
+/experiments/ping-demo/web/site
