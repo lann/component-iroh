@@ -61,6 +61,34 @@
         overflow-wrap: anywhere;
         text-align: center;
       }
+      #debug-toggle {
+        position: fixed;
+        bottom: 8px;
+        right: 8px;
+        width: 28px;
+        height: 28px;
+        border: 1px solid #444;
+        border-radius: 50%;
+        background: #111;
+        color: #888;
+        font: inherit;
+        cursor: pointer;
+      }
+      #debug {
+        position: fixed;
+        bottom: 44px;
+        right: 8px;
+        display: none;
+        max-width: min(92vw, 620px);
+        padding: 8px 10px;
+        border: 1px solid #333;
+        border-radius: 6px;
+        background: rgba(10, 10, 10, 0.92);
+        color: #9c9;
+        font: 11px/1.5 ui-monospace, monospace;
+        white-space: pre;
+        overflow-x: auto;
+      }
     </style>
   </head>
   <body>
@@ -70,6 +98,8 @@
       <canvas id="qr"></canvas>
       <a id="link" href="#" target="_blank" rel="noreferrer"></a>
     </div>
+    <pre id="debug"></pre>
+    <button id="debug-toggle" title="debug info">i</button>
     <script type="module" src="./demo.mjs"></script>
   </body>
 </html>

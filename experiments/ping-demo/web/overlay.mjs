@@ -85,10 +85,13 @@ export function beginUpgrade({ remoteIdHex, initiator, sendSignal, onStatus = ()
   let sendChain = Promise.resolve();
   const backlog = [];
   let remoteDescribed = false;
+  let closed = false;
   const pendingCandidates = [];
 
-  // Datagrams toward the remote synthetic address ride the channel.
+  // Datagrams toward the remote synthetic address ride the channel. A new
+  // session's beginUpgrade re-registers this route, replacing the old one.
   registerAddrRoute(remote.address, remote.port, (_socket, d) => {
+    if (closed) return;
     const bytes = d.data.slice();
     if (channel) {
       overlayStats.out++;
@@ -176,6 +179,7 @@ export function beginUpgrade({ remoteIdHex, initiator, sendSignal, onStatus = ()
 
   return {
     async signal(msg) {
+      if (closed) return;
       try {
         if (msg.k === "desc" && msg.d.kind === "offer") {
           await pc.setRemoteDescription(msg.d);
@@ -199,6 +203,14 @@ export function beginUpgrade({ remoteIdHex, initiator, sendSignal, onStatus = ()
       } catch (err) {
         onStatus(`signaling failed: ${err?.message ?? JSON.stringify(err)}`);
       }
+    },
+    /** Ends this upgrade session: later datagrams and signals are dropped. */
+    close() {
+      closed = true;
+      channel = null;
+      try {
+        pc.close();
+      } catch {}
     },
   };
 }

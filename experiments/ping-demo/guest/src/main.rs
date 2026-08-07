@@ -11,6 +11,8 @@
 //!
 //! Environment (via the shim's GUEST_ENV):
 //! - `ROLE`: "host" or "join"
+//! - `SECRET`: hex ed25519 secret key — the page persists it per tab so
+//!   an endpoint keeps its identity across refreshes (rejoin)
 //! - `PEER`, `PEER_RELAY`: the host's endpoint id and home relay (join)
 //! - `RELAY`: optional relay override for both roles (local testing;
 //!   default is the n0 public relay map)
@@ -19,8 +21,16 @@
 //! frames whose `t` the guest owns are status events ("ready",
 //! "connected", "path", "closed", "error"); every other frame from the
 //! page is forwarded verbatim to the peer, and peer frames are
-//! delivered verbatim to the page. Stream framing: u16 BE length +
-//! bytes.
+//! delivered verbatim to the page. An EMPTY datagram from the page
+//! closes the current session (best-effort "bye" on page unload).
+//! Stream framing: u16 BE length + bytes.
+//!
+//! Sessions loop: the host returns to accepting when a session ends
+//! (refusing extra participants while one is active), and the joiner
+//! redials every couple of seconds — either side can leave and rejoin.
+//! Peer loss without a clean close is bounded by a shortened QUIC idle
+//! timeout (keepalives are on by default, so live sessions never idle
+//! out).
 //!
 //! Overlay control protocol (synthetic port 2): see the page bridge
 //! (overlay.mjs); identical to the iroh-relay-ws spike.
@@ -31,7 +41,7 @@ use std::time::Duration;
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr,
-    endpoint::{Connection, presets},
+    endpoint::{Connection, QuicTransportConfig, presets},
 };
 
 const ALPN: &[u8] = b"/polymorph/ping-demo/1";
@@ -41,6 +51,10 @@ const TAG_REGISTER: u8 = 0x00;
 const TAG_ASSIGNED: u8 = 0x01;
 const TAG_READY: u8 = 0x02;
 const MAX_FRAME: usize = 16 * 1024;
+/// Peer-loss detection bound for abrupt departures (closed tabs rarely
+/// manage to flush a CONNECTION_CLOSE).
+const IDLE_TIMEOUT: Duration = Duration::from_secs(8);
+const REDIAL_DELAY: Duration = Duration::from_secs(2);
 
 fn main() {
     tracing_subscriber::fmt()
@@ -142,6 +156,18 @@ fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+fn parse_secret(hex: &str) -> Option<SecretKey> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(SecretKey::from_bytes(&bytes))
+}
+
 fn selected_path(conn: &Connection) -> (&'static str, u64) {
     let paths = conn.paths();
     let Some(p) = paths.iter().find(|p| p.is_selected()) else {
@@ -163,10 +189,17 @@ async fn run() {
         Some(url) => RelayMode::custom([url.parse::<RelayUrl>().expect("RELAY url")]),
         None => RelayMode::Default,
     };
+    let secret = env_var("SECRET")
+        .and_then(|h| parse_secret(&h))
+        .unwrap_or_else(SecretKey::generate);
+    let transport_config = QuicTransportConfig::builder()
+        .max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("idle timeout")))
+        .build();
 
     let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(SecretKey::generate())
+        .secret_key(secret)
         .relay_mode(relay_mode)
+        .transport_config(transport_config)
         .clear_address_lookup()
         .alpns(if role == "host" {
             vec![ALPN.to_vec()]
@@ -198,20 +231,42 @@ async fn run() {
     )
     .await;
 
-    // Establish the session over the relay.
-    let conn: Connection = if role == "host" {
-        let incoming = endpoint.accept().await.expect("accept");
-        let conn = incoming.await.expect("incoming handshake");
-        // One session only: turn later arrivals away.
-        let busy = endpoint.clone();
+    // Overlay readiness: every session's channel reports again once open;
+    // re-adding the address is harmless (the configured set deduplicates).
+    {
+        let endpoint = endpoint.clone();
+        let page = page.clone();
         tokio::spawn(async move {
-            while let Some(incoming) = busy.accept().await {
-                if let Ok(conn) = incoming.await {
-                    conn.close(1u32.into(), b"session full");
-                }
+            loop {
+                overlay.ready().await;
+                endpoint.add_external_addr(overlay.external_addr).await;
+                page.event("overlay", &[format!("\"state\":\"added\"")]).await;
             }
         });
-        conn
+    }
+
+    // Session loop: either side can leave and rejoin.
+    if role == "host" {
+        loop {
+            let Some(incoming) = endpoint.accept().await else {
+                break;
+            };
+            let Ok(conn) = incoming.await else { continue };
+            // Refuse extra participants while this session runs.
+            let refuser = {
+                let endpoint = endpoint.clone();
+                tokio::spawn(async move {
+                    while let Some(incoming) = endpoint.accept().await {
+                        if let Ok(conn) = incoming.await {
+                            conn.close(1u32.into(), b"session full");
+                        }
+                    }
+                })
+            };
+            session(&page, &conn, true).await;
+            refuser.abort();
+            page.event("closed", &[]).await;
+        }
     } else {
         let peer: EndpointId = env_var("PEER")
             .expect("PEER required to join")
@@ -221,10 +276,25 @@ async fn run() {
             .expect("PEER_RELAY required to join")
             .parse()
             .expect("parse PEER_RELAY");
-        let addr = EndpointAddr::from_parts(peer, [TransportAddr::Relay(peer_relay)]);
-        endpoint.connect(addr, ALPN).await.expect("connect")
-    };
+        loop {
+            let addr =
+                EndpointAddr::from_parts(peer, [TransportAddr::Relay(peer_relay.clone())]);
+            // Bounded dial: while the host is away (e.g. mid-reload), a
+            // hung attempt must not stall the redial loop.
+            if let Ok(Ok(conn)) =
+                tokio::time::timeout(Duration::from_secs(5), endpoint.connect(addr, ALPN)).await
+            {
+                session(&page, &conn, false).await;
+                page.event("closed", &[]).await;
+            }
+            tokio::time::sleep(REDIAL_DELAY).await;
+        }
+    }
+}
 
+/// One session: stream setup, then the ferry until the connection ends or
+/// the page says bye (an empty datagram).
+async fn session(page: &Page, conn: &Connection, host: bool) {
     let remote = conn.remote_id();
     page.event("connected", &[format!("\"peer\":\"{remote}\"")])
         .await;
@@ -232,27 +302,22 @@ async fn run() {
     // The joiner opens the ferry stream; the host accepts it. An empty
     // frame makes the fresh stream visible to the acceptor — QUIC streams
     // do not exist on the remote until bytes flow.
-    let (mut stream_send, mut stream_recv) = if role == "host" {
-        conn.accept_bi().await.expect("accept_bi")
+    let streams = if host {
+        conn.accept_bi().await.ok()
     } else {
-        let (mut send, recv) = conn.open_bi().await.expect("open_bi");
-        send.write_all(&0u16.to_be_bytes())
-            .await
-            .expect("stream hello");
-        (send, recv)
+        match conn.open_bi().await {
+            Ok((mut send, recv)) => send
+                .write_all(&0u16.to_be_bytes())
+                .await
+                .ok()
+                .map(|()| (send, recv)),
+            Err(_) => None,
+        }
     };
-
-    // Overlay readiness (the page bridge reports the channel open) gates
-    // handing iroh the synthetic address; iroh does the rest in-band.
-    {
-        let endpoint = endpoint.clone();
-        let page = page.clone();
-        tokio::spawn(async move {
-            overlay.ready().await;
-            endpoint.add_external_addr(overlay.external_addr).await;
-            page.event("overlay", &[format!("\"state\":\"added\"")]).await;
-        });
-    }
+    let Some((mut stream_send, mut stream_recv)) = streams else {
+        // Refused ("session full") or lost during setup; the caller loops.
+        return;
+    };
 
     // Peer -> page: length-framed stream to raw datagrams.
     let reader = {
@@ -274,7 +339,7 @@ async fn run() {
     };
 
     // Path watcher: report the selected path whenever it changes.
-    {
+    let watcher = {
         let conn = conn.clone();
         let page = page.clone();
         tokio::spawn(async move {
@@ -294,15 +359,19 @@ async fn run() {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-        });
-    }
+        })
+    };
 
     // Page -> peer: raw datagrams to length-framed stream, until the
-    // connection or the reader ends.
+    // connection ends or the page says bye.
     let mut buf = vec![0u8; MAX_FRAME];
     loop {
         tokio::select! {
             n = page.recv(&mut buf) => {
+                if n == 0 {
+                    conn.close(0u32.into(), b"bye");
+                    break;
+                }
                 let frame = &buf[..n];
                 if stream_send.write_all(&(n as u16).to_be_bytes()).await.is_err()
                     || stream_send.write_all(frame).await.is_err()
@@ -315,6 +384,5 @@ async fn run() {
     }
 
     reader.abort();
-    page.event("closed", &[]).await;
-    endpoint.close().await;
+    watcher.abort();
 }

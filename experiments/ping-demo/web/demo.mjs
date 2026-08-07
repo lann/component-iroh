@@ -26,11 +26,26 @@ const ctx = canvas.getContext("2d");
 const params = new URLSearchParams(location.search);
 const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
 const relayOverride = params.get("relay") ?? undefined;
-const joining = hash.has("j");
+
+// Identity persists per tab (sessionStorage): a refresh rejoins the same
+// session with the same endpoint id. The host writes the join payload
+// into its own fragment, so role detection is "does the fragment name
+// me?" — a fresh tab on a host's URL becomes a joiner, the host's own
+// tab re-hosts.
+let secret = sessionStorage.getItem("ping-demo-secret");
+if (!secret) {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  secret = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  sessionStorage.setItem("ping-demo-secret", secret);
+}
+const storedId = sessionStorage.getItem("ping-demo-id");
+const fragmentPeer = hash.get("j");
+const joining = Boolean(fragmentPeer) && fragmentPeer !== storedId;
 
 globalThis.GUEST_ENV = {
   ROLE: joining ? "join" : "host",
-  ...(joining && { PEER: hash.get("j"), PEER_RELAY: hash.get("r") }),
+  SECRET: secret,
+  ...(joining && { PEER: fragmentPeer, PEER_RELAY: hash.get("r") }),
   ...(relayOverride && { RELAY: relayOverride }),
 };
 
@@ -40,6 +55,9 @@ const demo = (globalThis.__demo = {
   state: "loading",
   path: "none",
   rttUs: 0,
+  selfId: storedId,
+  peerId: null,
+  relay: null,
   joinUrl: null,
   pings: 0,
   remotePings: 0,
@@ -58,13 +76,11 @@ function setStatus(state, text) {
 let guestSocket = null;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const GUEST_FROM = { tag: "ipv4", val: { port: 3, address: [127, 0, 0, 1] } };
 
 function sendToGuest(obj) {
   if (!guestSocket) return;
-  pushDatagram(guestSocket, encoder.encode(JSON.stringify(obj)), {
-    tag: "ipv4",
-    val: { port: 3, address: [127, 0, 0, 1] },
-  });
+  pushDatagram(guestSocket, encoder.encode(JSON.stringify(obj)), GUEST_FROM);
 }
 
 let upgrade = null;
@@ -79,10 +95,16 @@ registerBridge(3, (socket, { data }) => {
   }
   switch (msg.t) {
     case "ready": {
+      demo.selfId = msg.id;
+      demo.relay = msg.relay;
       if (demo.role === "host") {
+        sessionStorage.setItem("ping-demo-id", msg.id);
         const url = new URL(location.href);
         url.hash = `j=${msg.id}&r=${encodeURIComponent(msg.relay)}`;
         demo.joinUrl = url.href;
+        // The host's own URL carries the session: a refresh re-hosts it,
+        // and the address bar is shareable as-is.
+        history.replaceState(null, "", url.hash);
         showQr(url.href);
         setStatus("waiting", "scan to join");
       } else {
@@ -91,8 +113,10 @@ registerBridge(3, (socket, { data }) => {
       break;
     }
     case "connected": {
+      demo.peerId = msg.peer;
       qrBox.style.display = "none";
       setStatus("connected", "connected · relay");
+      upgrade?.close();
       upgrade = beginUpgrade({
         remoteIdHex: msg.peer,
         initiator: demo.role === "host",
@@ -126,7 +150,18 @@ registerBridge(3, (socket, { data }) => {
       break;
     }
     case "closed": {
-      setStatus("closed", "peer left");
+      demo.peerId = null;
+      demo.path = "none";
+      upgrade?.close();
+      upgrade = null;
+      if (demo.role === "host") {
+        // The guest is accepting again; the same QR/URL rejoins.
+        if (demo.joinUrl) showQr(demo.joinUrl);
+        setStatus("closed", "peer left · scan to rejoin");
+      } else {
+        // The guest redials every couple of seconds.
+        setStatus("closed", "peer left · reconnecting…");
+      }
       break;
     }
     case "error": {
@@ -209,6 +244,57 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// --- lifecycle ---------------------------------------------------------------
+
+// A real departure (navigation, tab close, bfcache entry) sends a
+// best-effort bye so the peer learns immediately; task switches only fire
+// visibilitychange and keep the session alive. When the guest cannot
+// flush the close in time, the peer's QUIC idle timeout (8s) is the
+// backstop. An empty datagram is the guest's bye control frame.
+window.addEventListener("pagehide", () => {
+  if (guestSocket) pushDatagram(guestSocket, new Uint8Array(0), GUEST_FROM);
+});
+// A bfcache-restored page holds a frozen guest whose session is long
+// dead; reboot — the persisted identity and fragment rejoin by themselves.
+window.addEventListener("pageshow", (ev) => {
+  if (ev.persisted) location.reload();
+});
+
+// --- debug panel ---------------------------------------------------------------
+
+const debugBtn = document.getElementById("debug-toggle");
+const debugEl = document.getElementById("debug");
+let debugTimer = null;
+
+function renderDebug() {
+  const o = demo.overlay;
+  const s = demo.shim;
+  debugEl.textContent = [
+    `role      ${demo.role}`,
+    `state     ${demo.state}`,
+    `self      ${demo.selfId ?? "…"}`,
+    `peer      ${demo.peerId ?? "—"}`,
+    `relay     ${demo.relay ?? "…"}`,
+    `path      ${demo.path}${demo.rttUs ? ` (${(demo.rttUs / 1000).toFixed(1)}ms)` : ""}`,
+    `channel   in=${o.in} out=${o.out} dropped=${o.droppedWhileConnecting}`,
+    `datagrams in=${s.datagramsIn} out=${s.datagramsOut}`,
+    `pings     sent=${demo.pings} received=${demo.remotePings}`,
+  ].join("\n");
+}
+
+debugBtn.addEventListener("click", () => {
+  const visible = debugEl.style.display === "block";
+  debugEl.style.display = visible ? "none" : "block";
+  if (debugTimer) {
+    clearInterval(debugTimer);
+    debugTimer = null;
+  }
+  if (!visible) {
+    renderDebug();
+    debugTimer = setInterval(renderDebug, 1000);
+  }
+});
 
 // --- boot --------------------------------------------------------------------
 

@@ -137,13 +137,53 @@ try {
   });
   console.log("[harness] join->host ping mirrored");
 
-  // A third participant is turned away.
+  // A third participant is turned away (single-pair sessions) — then
+  // closed, so it cannot race the rejoin scenario below.
   const third = await openPage(context, "third", joinUrl);
   await third.waitForFunction(
     () => ["closed", "error"].includes(globalThis.__demo?.state),
     { timeout: TIMEOUT },
   );
+  await third.close();
   console.log("[harness] third participant refused");
+
+  // Rejoin: the host reloads mid-session. Its identity persists
+  // (sessionStorage secret + fragment), the joiner detects the loss
+  // within the idle-timeout bound and its guest redials until the
+  // re-hosted session accepts.
+  const hostIdBefore = new URLSearchParams(new URL(joinUrl).hash.slice(1)).get("j");
+  const joinPingsBefore = await joiner.evaluate(() => globalThis.__demo.remotePings);
+  await host.reload();
+  await joiner.waitForFunction(() => globalThis.__demo?.state === "closed", {
+    timeout: 25_000,
+  });
+  console.log("[harness] joiner saw peer leave");
+  const rehostUrl = await host
+    .waitForFunction(() => globalThis.__demo?.joinUrl, { timeout: TIMEOUT })
+    .then((h) => h.jsonValue());
+  const hostIdAfter = new URLSearchParams(new URL(rehostUrl).hash.slice(1)).get("j");
+  if (hostIdAfter !== hostIdBefore) {
+    throw new Error(`host identity changed across reload: ${hostIdBefore} -> ${hostIdAfter}`);
+  }
+  console.log("[harness] host re-hosted with the same identity");
+  await joiner.waitForFunction(
+    () => ["connected", "live"].includes(globalThis.__demo?.state),
+    { timeout: TIMEOUT },
+  );
+  console.log("[harness] joiner reconnected");
+  for (const [name, page] of [["host", host], ["join", joiner]]) {
+    await page.waitForFunction(() => globalThis.__demo?.path === "direct", {
+      timeout: TIMEOUT,
+    });
+  }
+  console.log("[harness] re-migrated to direct");
+  await host.click("#view", { position: { x: 90, y: 90 } });
+  await joiner.waitForFunction(
+    (before) => globalThis.__demo?.remotePings > before,
+    joinPingsBefore,
+    { timeout: TIMEOUT },
+  );
+  console.log("[harness] ping mirrored after rejoin");
 } catch (err) {
   failures.push(String(err));
   if (host) await dumpState("host", host);
