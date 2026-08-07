@@ -26,13 +26,14 @@ struct Cli {
     role: Role,
     peer: Option<String>,
     direct: Option<String>,
+    datagram: bool,
     message: String,
 }
 
 fn usage() -> anyhow::Error {
     anyhow!(
         "usage: iroh-peer --role <client|server> \
-         [--direct <ip:port>] [--message M] [--peer <endpoint-id-hex>]"
+         [--direct <ip:port>] [--datagram] [--message M] [--peer <endpoint-id-hex>]"
     )
 }
 
@@ -41,6 +42,7 @@ fn parse_args() -> Result<Cli> {
     let mut role = None;
     let mut peer = None;
     let mut direct = None;
+    let mut datagram = false;
     let mut message = "hello from upstream iroh".to_string();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(usage);
@@ -54,6 +56,7 @@ fn parse_args() -> Result<Cli> {
             }
             "--peer" => peer = Some(value()?),
             "--direct" => direct = Some(value()?),
+            "--datagram" => datagram = true,
             "--message" => message = value()?,
             _ => return Err(usage()),
         }
@@ -62,6 +65,7 @@ fn parse_args() -> Result<Cli> {
         role: role.ok_or_else(usage)?,
         peer,
         direct,
+        datagram,
         message,
     })
 }
@@ -89,16 +93,21 @@ async fn main() -> Result<()> {
     println!("direct-addr {direct_addr}");
 
     match cli.role {
-        Role::Server => run_server(&endpoint).await?,
+        Role::Server => run_server(&endpoint, &cli).await?,
         Role::Client => run_client(&endpoint, &cli).await?,
     }
     endpoint.close().await;
     Ok(())
 }
 
-/// Serve one connection: echo the first bidirectional stream verbatim,
-/// then wait for the client's close.
-async fn run_server(endpoint: &Endpoint) -> Result<()> {
+/// Copies of the demo datagram sent/echoed, matching the endpoint
+/// demo's loss-robustness convention.
+const DATAGRAM_COPIES: usize = 3;
+
+/// Serve one connection: echo the first bidirectional stream verbatim
+/// (and, with `--datagram`, one datagram), then wait for the client's
+/// close.
+async fn run_server(endpoint: &Endpoint, cli: &Cli) -> Result<()> {
     let incoming = endpoint.accept().await.context("endpoint closed")?;
     let conn = incoming.await?;
     println!("accepted {}", hex::encode(conn.remote_id().as_bytes()));
@@ -106,12 +115,20 @@ async fn run_server(endpoint: &Endpoint) -> Result<()> {
     let echoed = tokio::io::copy(&mut recv, &mut send).await?;
     send.finish()?;
     println!("echoed {echoed} bytes");
+    if cli.datagram {
+        let payload = conn.read_datagram().await?;
+        for _ in 0..DATAGRAM_COPIES {
+            conn.send_datagram(payload.clone())?;
+        }
+        println!("echoed datagram ({} bytes)", payload.len());
+    }
     conn.closed().await;
     println!("OK: server finished.");
     Ok(())
 }
 
-/// Dial `--direct`, send the message, and assert the uppercased echo.
+/// Dial `--direct`, send the message, and assert the uppercased echo
+/// (and, with `--datagram`, a verbatim datagram echo).
 async fn run_client(endpoint: &Endpoint, cli: &Cli) -> Result<()> {
     let peer_hex = cli.peer.as_ref().ok_or_else(usage)?;
     let peer_bytes: [u8; 32] = hex::decode(peer_hex)?
@@ -131,6 +148,21 @@ async fn run_client(endpoint: &Endpoint, cli: &Cli) -> Result<()> {
     println!("received {text:?}");
     if text != cli.message.to_uppercase() {
         bail!("echo mismatch: sent {:?}, got {text:?}", cli.message);
+    }
+    if cli.datagram {
+        let payload = bytes::Bytes::from(format!("datagram {}", cli.message).into_bytes());
+        for _ in 0..DATAGRAM_COPIES {
+            conn.send_datagram(payload.clone())?;
+        }
+        let echoed = conn.read_datagram().await?;
+        if echoed != payload {
+            bail!(
+                "datagram echo mismatch: sent {} bytes, got {} bytes",
+                payload.len(),
+                echoed.len()
+            );
+        }
+        println!("received datagram ({} bytes)", echoed.len());
     }
     conn.close(0u32.into(), b"done");
     println!("OK: client finished.");
