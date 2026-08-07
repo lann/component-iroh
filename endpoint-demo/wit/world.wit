@@ -41,6 +41,11 @@ interface demo {
         /// round-trips the full payload; `roundtrip-ms` then measures
         /// bulk transfer, not latency.
         payload-bytes: option<u64>,
+        /// Also exchange one datagram echo after the stream echo: the
+        /// client sends a small datagram (duplicated against loss) and
+        /// asserts the server's echo. Exercises `send-datagram` /
+        /// `recv-datagram` end to end.
+        datagram: bool,
         /// The application message the client sends (the server echoes it).
         message: string,
     }
@@ -62,6 +67,8 @@ interface demo {
         roundtrip-ms: u64,
         /// The application payload this side received.
         received: string,
+        /// The datagram payload this side received, when `datagram` ran.
+        datagram: option<string>,
     }
 
     /// Drive one full run. The process's own endpoint ID is written to

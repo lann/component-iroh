@@ -22,6 +22,7 @@ const { values } = parseArgs({
     webrtc: { type: "boolean", default: false },
     "peer-relay": { type: "string" },
     "payload-bytes": { type: "string" },
+    datagram: { type: "boolean", default: false },
     message: { type: "string", default: "hello through the endpoint surface" },
   },
 });
@@ -46,13 +47,15 @@ async function main() {
     webrtc: values.webrtc,
     peerRelay: values["peer-relay"],
     payloadBytes: values["payload-bytes"] ? BigInt(values["payload-bytes"]) : undefined,
+    datagram: values.datagram,
     message,
   });
 
   console.log(
     `iroh-demo (${role}): endpoint=${report.endpointId} peer=${report.peerId} ` +
       `path=${report.path} handshake_ms=${report.handshakeMs} ` +
-      `roundtrip_ms=${report.roundtripMs} received=${JSON.stringify(report.received)}`,
+      `roundtrip_ms=${report.roundtripMs} received=${JSON.stringify(report.received)} ` +
+      `datagram=${JSON.stringify(report.datagram)}`,
   );
   console.log(`OK: ${role} finished.`);
 }

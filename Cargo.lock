@@ -2675,6 +2675,7 @@ name = "iroh-peer"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "bytes",
  "hex",
  "iroh",
  "tokio",

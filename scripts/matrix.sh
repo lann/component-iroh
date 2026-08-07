@@ -142,9 +142,10 @@ done
 # artifact the wasmtime rows run).
 
 run_pair "endpoint-relay-wasmtime-wasmtime" \
-    timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" -- \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
+        --datagram -- \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
-        --message "matrix endpoint" --peer
+        --datagram --message "matrix endpoint" --peer
 
 # The UDP direct path: the server binds a real socket (port 0 =
 # ephemeral) and the client dials the scraped address. The client
@@ -155,9 +156,9 @@ run_pair "endpoint-relay-wasmtime-wasmtime" \
 # UDP.
 run_pair "endpoint-udp-wasmtime-wasmtime" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
-        --udp-bind 127.0.0.1:0 -- \
+        --udp-bind 127.0.0.1:0 --datagram -- \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
-        --udp-bind 127.0.0.1:0 --message "matrix udp" --direct @DIRECT@ --peer
+        --udp-bind 127.0.0.1:0 --datagram --message "matrix udp" --direct @DIRECT@ --peer
 
 # The WebRTC wire: SDP/ICE signaled through the relay (a 0x00-prefixed
 # datagram convention a stock relay just forwards), then QUIC over the
@@ -166,9 +167,9 @@ run_pair "endpoint-udp-wasmtime-wasmtime" \
 # the channel; the relay carried only signaling for this connection.
 run_pair "endpoint-webrtc-wasmtime-wasmtime" \
     env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$EHOST" "$COMPOSED_WASM" \
-        --role server --relay "$RELAY_URL" --webrtc -- \
+        --role server --relay "$RELAY_URL" --webrtc --datagram -- \
     env WEBRTC_INCLUDE_LOOPBACK=1 timeout 120 "$EHOST" "$COMPOSED_WASM" \
-        --role client --relay "$RELAY_URL" --webrtc \
+        --role client --relay "$RELAY_URL" --webrtc --datagram \
         --message "matrix webrtc" --peer
 
 # Cross-relay: the server homes on relay B, the client on relay A. The
@@ -197,15 +198,15 @@ run_pair "endpoint-webrtc-cross-wasmtime-wasmtime" \
 # the QUIC + RPK-TLS wire against upstream, not just against ourselves.
 
 run_pair "interop-udp-ours-client" \
-    timeout 120 "$IROH_PEER" --role server -- \
+    timeout 120 "$IROH_PEER" --role server --datagram -- \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
-        --udp-bind 127.0.0.1:0 --message "interop ours-client" \
+        --udp-bind 127.0.0.1:0 --datagram --message "interop ours-client" \
         --direct @DIRECT@ --peer
 
 run_pair "interop-udp-theirs-client" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
-        --udp-bind 127.0.0.1:0 -- \
-    timeout 120 "$IROH_PEER" --role client \
+        --udp-bind 127.0.0.1:0 --datagram -- \
+    timeout 120 "$IROH_PEER" --role client --datagram \
         --message "interop theirs-client" --direct @DIRECT@ --peer
 
 # --- endpoint surface: failure paths must fail closed, in bounded time ----

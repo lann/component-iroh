@@ -580,7 +580,8 @@ fn on_event(
             }
         }
         // Polling method futures observe readable/writable/available
-        // state directly; the events carry nothing to record.
+        // state directly (streams and datagrams both queue inside noq);
+        // the events carry nothing to record.
         Event::Stream(_) => {}
         Event::DatagramReceived | Event::DatagramsUnblocked => {}
         Event::ConnectionLost { reason } => {
@@ -1351,6 +1352,47 @@ impl GuestConnection for ConnectionRes {
             id,
             streaming: Cell::new(false),
         }))
+    }
+
+    fn max_datagram_size(&self) -> Option<u32> {
+        self.with_entry(|e| e.conn.datagrams().max_size().map(|s| s as u32))
+    }
+
+    fn send_datagram(&self, data: Vec<u8>) -> Result<(), Error> {
+        self.with_entry(|e| {
+            if let Some(err) = &e.error {
+                return Err(err.clone());
+            }
+            // drop=true: a full send buffer discards the oldest queued
+            // datagrams (the WIT's lossy-transport ruling), so `Blocked`
+            // cannot come back.
+            e.conn
+                .datagrams()
+                .send(bytes::Bytes::from(data), true)
+                .map_err(|err| match err {
+                    noq_proto::SendDatagramError::TooLarge => {
+                        Error::InvalidArgument("datagram exceeds max-datagram-size".into())
+                    }
+                    noq_proto::SendDatagramError::UnsupportedByPeer => {
+                        Error::InvalidArgument("peer does not accept datagrams".into())
+                    }
+                    other => Error::Other(format!("send-datagram: {other}")),
+                })
+        })
+        // The pump's next tick flushes the queued datagram, the same
+        // bound stream writes live under.
+    }
+
+    async fn recv_datagram(&self) -> Result<Vec<u8>, Error> {
+        let handle = self.handle;
+        wait_until(&self.shared, |st| {
+            let entry = st.conns.get_mut(&handle).expect("connection entry");
+            if let Some(bytes) = entry.conn.datagrams().recv() {
+                return Some(Ok(bytes.to_vec()));
+            }
+            entry.error.as_ref().map(|err| Err(err.clone()))
+        })
+        .await
     }
 
     fn close(&self, code: u32, reason: String) {
