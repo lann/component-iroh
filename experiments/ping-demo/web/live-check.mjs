@@ -42,6 +42,23 @@ try {
   await joiner.click("#view", { position: { x: 80, y: 80 } });
   await host.waitForFunction(() => globalThis.__demo?.remotePings >= 1, { timeout: TIMEOUT });
   console.log("[live] ping mirrored join->host");
+
+  // File drop: 1MiB host -> joiner, bao-verified by iroh-blobs.
+  const payload = Buffer.alloc(1024 * 1024);
+  for (let i = 0; i < payload.length; i++) payload[i] = (i * 2654435761) & 0xff;
+  await host.setInputFiles("#file", {
+    name: "live.bin",
+    mimeType: "application/octet-stream",
+    buffer: payload,
+  });
+  await joiner.waitForFunction(
+    () =>
+      globalThis.__demo.transfers.some(
+        (t) => t.name === "live.bin" && t.state === "done" && t.bytes === t.size,
+      ),
+    { timeout: TIMEOUT },
+  );
+  console.log("[live] file transferred and verified");
   console.log("[live] PASS — deployed demo works over public relays");
 } catch (err) {
   console.error(`[live] FAIL: ${err}`);

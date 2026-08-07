@@ -62,6 +62,7 @@ const demo = (globalThis.__demo = {
   pings: 0,
   remotePings: 0,
   lastRemotePing: null,
+  transfers: [],
   overlay: overlayStats,
   shim: stats,
 });
@@ -90,6 +91,11 @@ let upgrade = null;
 
 registerBridge(3, (socket, { data }) => {
   guestSocket = socket;
+  // Download chunks (0x02) stream the currently fetched file.
+  if (data.length > 0 && data[0] === 0x02) {
+    receiving?.parts.push(data.slice(1));
+    return;
+  }
   let msg;
   try {
     msg = JSON.parse(decoder.decode(data));
@@ -136,6 +142,36 @@ registerBridge(3, (socket, { data }) => {
       demo.remotePings++;
       demo.lastRemotePing = { x: msg.x, y: msg.y };
       ripple(msg.x, msg.y, "#f0f");
+      break;
+    }
+    // --- file transfer events -------------------------------------------
+    case "offer": {
+      // Peer offers a blob: fetch it (bao-verified) via the guest.
+      onOffer(msg);
+      break;
+    }
+    case "received": {
+      onPeerReceived(msg.hash);
+      break;
+    }
+    case "added": {
+      onAdded(msg);
+      break;
+    }
+    case "progress": {
+      onProgress(msg);
+      break;
+    }
+    case "file-start": {
+      onFileStart(msg);
+      break;
+    }
+    case "file-done": {
+      onFileDone(msg);
+      break;
+    }
+    case "file-error": {
+      onFileError(msg);
       break;
     }
     case "path": {
@@ -247,6 +283,154 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// --- file transfer -------------------------------------------------------
+//
+// Sender: file bytes stream to the guest in 0x01 chunks; the guest adds
+// them to its blob store ("added") and this page offers the hash to the
+// peer over the ferry. Receiver: on "offer" it asks its guest to fetch
+// (stock iroh-blobs, bao-verified, over a blobs-ALPN connection riding
+// the session's path); the bytes come back in 0x02 chunks and become a
+// download link. Single-flight per direction, demo-sized cap.
+
+const CHUNK = 16 * 1024 - 1;
+const MAX_FILE = 64 * 1024 * 1024;
+const filesEl = document.getElementById("transfers");
+const fileInput = document.getElementById("file");
+let sendSeq = 0;
+const sends = new Map(); // id -> transfer
+const fetches = new Map(); // hash -> transfer
+let receiving = null;
+
+function addTransfer(dir, name, size) {
+  const el = document.createElement("div");
+  el.className = "transfer";
+  filesEl.appendChild(el);
+  const t = { dir, name, size, hash: null, state: "starting", el, t0: performance.now() };
+  demo.transfers.push(t);
+  return t;
+}
+
+function renderTransfer(t, text, link) {
+  const arrow = t.dir === "up" ? "↑" : "↓";
+  const mib = (t.size / (1024 * 1024)).toFixed(1);
+  if (link) {
+    t.el.textContent = "";
+    const a = document.createElement("a");
+    a.href = link;
+    a.download = t.name;
+    a.textContent = `${arrow} ${t.name} · ${mib} MiB · save`;
+    t.el.appendChild(a);
+  } else {
+    t.el.textContent = `${arrow} ${t.name} · ${text}`;
+  }
+}
+
+async function sendFile(file) {
+  if (!guestSocket || !demo.peerId) return;
+  if (file.size === 0 || file.size > MAX_FILE) {
+    const t = addTransfer("up", file.name, file.size);
+    t.state = "error";
+    renderTransfer(t, file.size === 0 ? "empty" : "too big (max 64 MiB)");
+    return;
+  }
+  const id = sendSeq++;
+  const t = addTransfer("up", file.name, file.size);
+  sends.set(id, t);
+  renderTransfer(t, "reading…");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  sendToGuest({ t: "send", id, name: file.name, size: file.size });
+  for (let off = 0; off < bytes.length; off += CHUNK) {
+    const chunk = bytes.subarray(off, Math.min(off + CHUNK, bytes.length));
+    const frame = new Uint8Array(1 + chunk.length);
+    frame[0] = 0x01;
+    frame.set(chunk, 1);
+    pushDatagram(guestSocket, frame, GUEST_FROM);
+    // Yield so the guest can drain and the UI can paint.
+    if ((off / CHUNK) % 64 === 63) {
+      renderTransfer(t, `hashing ${Math.round((off / bytes.length) * 100)}%`);
+      await new Promise((r) => setTimeout(r));
+    }
+  }
+  renderTransfer(t, "hashing…");
+}
+
+function onAdded(msg) {
+  const t = sends.get(msg.id);
+  if (!t) return;
+  t.hash = msg.hash;
+  t.state = "offered";
+  renderTransfer(t, "sent · waiting for peer");
+  sendToGuest({ t: "offer", hash: msg.hash, name: t.name, size: t.size });
+}
+
+function onPeerReceived(hash) {
+  for (const t of sends.values()) {
+    if (t.hash === hash) {
+      t.state = "done";
+      const secs = (performance.now() - t.t0) / 1000;
+      renderTransfer(t, `delivered · ${(t.size / (1024 * 1024) / secs).toFixed(1)} MiB/s`);
+      console.log(`[file] up ${t.name} delivered in ${secs.toFixed(1)}s`);
+    }
+  }
+}
+
+function onOffer(msg) {
+  const t = addTransfer("down", msg.name, msg.size);
+  t.hash = msg.hash;
+  t.state = "fetching";
+  fetches.set(msg.hash, t);
+  renderTransfer(t, "fetching…");
+  sendToGuest({ t: "fetch", hash: msg.hash, size: msg.size });
+}
+
+function onProgress(msg) {
+  const t = fetches.get(msg.hash);
+  if (t) renderTransfer(t, `fetching ${Math.round((msg.done / msg.total) * 100)}%`);
+}
+
+function onFileStart(msg) {
+  const t = fetches.get(msg.hash);
+  if (!t) return;
+  receiving = t;
+  t.parts = [];
+}
+
+function onFileDone(msg) {
+  const t = fetches.get(msg.hash);
+  if (!t || receiving !== t) return;
+  receiving = null;
+  const blob = new Blob(t.parts, { type: "application/octet-stream" });
+  t.parts = null;
+  t.bytes = blob.size;
+  t.state = "done";
+  const secs = (performance.now() - t.t0) / 1000;
+  renderTransfer(t, "", URL.createObjectURL(blob));
+  sendToGuest({ t: "received", hash: msg.hash });
+  console.log(
+    `[file] down ${t.name} ${blob.size} bytes in ${secs.toFixed(1)}s = ${(blob.size / (1024 * 1024) / secs).toFixed(1)} MiB/s`,
+  );
+}
+
+function onFileError(msg) {
+  console.error(`[file] error: ${msg.msg}`);
+  if (receiving) {
+    receiving.state = "error";
+    renderTransfer(receiving, `failed: ${msg.msg}`);
+    receiving = null;
+  }
+}
+
+document.getElementById("send-file").addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => {
+  for (const file of fileInput.files) await sendFile(file);
+  fileInput.value = "";
+});
+window.addEventListener("dragover", (ev) => ev.preventDefault());
+window.addEventListener("drop", async (ev) => {
+  ev.preventDefault();
+  for (const file of ev.dataTransfer?.files ?? []) await sendFile(file);
+});
 
 // --- lifecycle ---------------------------------------------------------------
 

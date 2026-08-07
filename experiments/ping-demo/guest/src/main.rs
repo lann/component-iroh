@@ -17,13 +17,24 @@
 //! - `RELAY`: optional relay override for both roles (local testing;
 //!   default is the n0 public relay map)
 //!
-//! Page protocol (synthetic port 3, one JSON object per datagram):
-//! frames whose `t` the guest owns are status events ("ready",
-//! "connected", "path", "closed", "error"); every other frame from the
-//! page is forwarded verbatim to the peer, and peer frames are
-//! delivered verbatim to the page. An EMPTY datagram from the page
-//! closes the current session (best-effort "bye" on page unload).
-//! Stream framing: u16 BE length + bytes.
+//! Page protocol (synthetic port 3, one datagram each):
+//! - empty: close the current session (best-effort "bye" on unload)
+//! - first byte 0x01: an upload chunk (page -> guest, after a "send")
+//! - first byte 0x02: a download chunk (guest -> page, during a fetch)
+//! - JSON otherwise. The guest intercepts the page commands "send"
+//!   (announce an upload; chunks follow) and "fetch" (retrieve a blob
+//!   from the session peer); its own status events are "ready",
+//!   "connected", "path", "closed", "error", "added", "file-start",
+//!   "progress", "file-done", "file-error". Every other frame from the
+//!   page is forwarded verbatim to the peer, and peer frames are
+//!   delivered verbatim to the page. Stream framing: u16 BE length +
+//!   bytes.
+//!
+//! Files ride stock iroh-blobs: uploads land in an in-memory store
+//! (`MemStore`) and are served to the peer through the stock
+//! `BlobsProtocol` on its own ALPN and connection (which shares the
+//! session's migrated path — iroh opens the selected path on every
+//! connection to the remote); fetches are bao-verified.
 //!
 //! Sessions loop: the host returns to accepting when a session ends
 //! (refusing extra participants while one is active), and the joiner
@@ -37,12 +48,15 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr,
     endpoint::{Connection, QuicTransportConfig, presets},
+    protocol::ProtocolHandler,
 };
+use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
 
 const ALPN: &[u8] = b"/polymorph/ping-demo/1";
 const PAGE_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::LOCALHOST, 3);
@@ -50,11 +64,25 @@ const OVERLAY_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::LOCALHOST, 2);
 const TAG_REGISTER: u8 = 0x00;
 const TAG_ASSIGNED: u8 = 0x01;
 const TAG_READY: u8 = 0x02;
+const TAG_UP_CHUNK: u8 = 0x01;
+const TAG_DOWN_CHUNK: u8 = 0x02;
 const MAX_FRAME: usize = 16 * 1024;
+const DOWN_CHUNK: usize = MAX_FRAME - 1;
 /// Peer-loss detection bound for abrupt departures (closed tabs rarely
 /// manage to flush a CONNECTION_CLOSE).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const REDIAL_DELAY: Duration = Duration::from_secs(2);
+
+/// Page commands the guest intercepts; any JSON that does not parse as
+/// one is a peer frame and is forwarded verbatim.
+#[derive(serde::Deserialize)]
+#[serde(tag = "t")]
+enum PageCommand {
+    #[serde(rename = "send")]
+    Send { id: u32, name: String, size: u64 },
+    #[serde(rename = "fetch")]
+    Fetch { hash: String, size: u64 },
+}
 
 fn main() {
     tracing_subscriber::fmt()
@@ -202,14 +230,17 @@ async fn run() {
         .transport_config(transport_config)
         .clear_address_lookup()
         .alpns(if role == "host" {
-            vec![ALPN.to_vec()]
+            vec![ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]
         } else {
-            vec![]
+            // The joiner accepts no sessions, but serves blobs: when it
+            // sends a file, the host fetches from it.
+            vec![iroh_blobs::ALPN.to_vec()]
         })
         .bind()
         .await
         .expect("bind endpoint");
 
+    let store = MemStore::new();
     let overlay = Overlay::register(&endpoint).await;
 
     // Only the host needs to be online (its home relay is the session's
@@ -252,26 +283,40 @@ async fn run() {
         });
     }
 
+    // One acceptor per endpoint: blobs connections are served by the stock
+    // protocol handler in the background; session (ping-ALPN) connections
+    // go to the host's session loop, or are refused while one is active
+    // (and always, on the joiner).
+    let (session_tx, mut session_rx) = tokio::sync::mpsc::channel::<Connection>(1);
+    let session_busy = Arc::new(AtomicBool::new(false));
+    {
+        let endpoint = endpoint.clone();
+        let blobs = BlobsProtocol::new(&store, None);
+        let busy = session_busy.clone();
+        let is_host = role == "host";
+        tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                let Ok(conn) = incoming.await else { continue };
+                if conn.alpn() == iroh_blobs::ALPN {
+                    let blobs = blobs.clone();
+                    tokio::spawn(async move {
+                        blobs.accept(conn).await.ok();
+                    });
+                } else if !is_host || busy.load(Ordering::Relaxed) {
+                    conn.close(1u32.into(), b"session full");
+                } else {
+                    session_tx.send(conn).await.ok();
+                }
+            }
+        });
+    }
+
     // Session loop: either side can leave and rejoin.
     if role == "host" {
-        loop {
-            let Some(incoming) = endpoint.accept().await else {
-                break;
-            };
-            let Ok(conn) = incoming.await else { continue };
-            // Refuse extra participants while this session runs.
-            let refuser = {
-                let endpoint = endpoint.clone();
-                tokio::spawn(async move {
-                    while let Some(incoming) = endpoint.accept().await {
-                        if let Ok(conn) = incoming.await {
-                            conn.close(1u32.into(), b"session full");
-                        }
-                    }
-                })
-            };
-            session(&page, &conn, true).await;
-            refuser.abort();
+        while let Some(conn) = session_rx.recv().await {
+            session_busy.store(true, Ordering::Relaxed);
+            session(&page, &endpoint, &store, &conn, true).await;
+            session_busy.store(false, Ordering::Relaxed);
             page.event("closed", &[]).await;
         }
     } else {
@@ -292,7 +337,7 @@ async fn run() {
             if let Ok(Ok(conn)) =
                 tokio::time::timeout(Duration::from_secs(10), endpoint.connect(addr, ALPN)).await
             {
-                session(&page, &conn, false).await;
+                session(&page, &endpoint, &store, &conn, false).await;
                 page.event("closed", &[]).await;
             }
             tokio::time::sleep(REDIAL_DELAY).await;
@@ -300,9 +345,92 @@ async fn run() {
     }
 }
 
+/// An upload in progress: the page announced a file and streams chunks.
+struct Upload {
+    id: u32,
+    name: String,
+    size: u64,
+    buf: Vec<u8>,
+}
+
+/// Fetches a blob from the session peer over a dedicated blobs-ALPN
+/// connection (which rides the session's selected path), then streams the
+/// verified bytes to the page.
+async fn fetch_and_deliver(
+    endpoint: Endpoint,
+    store: MemStore,
+    peer: EndpointId,
+    hash_hex: String,
+    size: u64,
+    page: Page,
+) {
+    let fail = |page: Page, msg: String| async move {
+        page.event("file-error", &[format!("\"msg\":\"{msg}\"")]).await;
+    };
+    let Ok(hash) = hash_hex.parse::<iroh_blobs::Hash>() else {
+        return fail(page, "bad hash".into()).await;
+    };
+    // No addresses: the live session already gave iroh a path to the peer.
+    let addr = EndpointAddr::from_parts(peer, []);
+    let conn = match endpoint.connect(addr, iroh_blobs::ALPN).await {
+        Ok(conn) => conn,
+        Err(err) => return fail(page, format!("connect: {err}")).await,
+    };
+
+    use n0_future::StreamExt;
+    let mut progress = store.remote().fetch(conn.clone(), hash).stream();
+    let mut last = Instant::now();
+    loop {
+        match progress.next().await {
+            Some(iroh_blobs::api::remote::GetProgressItem::Progress(done)) => {
+                if last.elapsed() > Duration::from_millis(200) {
+                    last = Instant::now();
+                    page.event(
+                        "progress",
+                        &[
+                            format!("\"hash\":\"{hash}\""),
+                            format!("\"done\":{done}"),
+                            format!("\"total\":{size}"),
+                        ],
+                    )
+                    .await;
+                }
+            }
+            Some(iroh_blobs::api::remote::GetProgressItem::Done(_)) => break,
+            Some(iroh_blobs::api::remote::GetProgressItem::Error(err)) => {
+                return fail(page, format!("fetch: {err}")).await;
+            }
+            None => return fail(page, "fetch ended early".into()).await,
+        }
+    }
+    conn.close(0u32.into(), b"done");
+
+    let bytes = match store.get_bytes(hash).await {
+        Ok(bytes) => bytes,
+        Err(err) => return fail(page, format!("read: {err}")).await,
+    };
+    page.event(
+        "file-start",
+        &[
+            format!("\"hash\":\"{hash}\""),
+            format!("\"size\":{}", bytes.len()),
+        ],
+    )
+    .await;
+    let mut frame = Vec::with_capacity(1 + DOWN_CHUNK);
+    for chunk in bytes.chunks(DOWN_CHUNK) {
+        frame.clear();
+        frame.push(TAG_DOWN_CHUNK);
+        frame.extend_from_slice(chunk);
+        page.send_raw(&frame).await;
+    }
+    page.event("file-done", &[format!("\"hash\":\"{hash}\"")]).await;
+}
+
 /// One session: stream setup, then the ferry until the connection ends or
-/// the page says bye (an empty datagram).
-async fn session(page: &Page, conn: &Connection, host: bool) {
+/// the page says bye (an empty datagram). Upload chunks and the
+/// send/fetch commands are intercepted here; everything else ferries.
+async fn session(page: &Page, endpoint: &Endpoint, store: &MemStore, conn: &Connection, host: bool) {
     let remote = conn.remote_id();
     page.event("connected", &[format!("\"peer\":\"{remote}\"")])
         .await;
@@ -371,8 +499,10 @@ async fn session(page: &Page, conn: &Connection, host: bool) {
     };
 
     // Page -> peer: raw datagrams to length-framed stream, until the
-    // connection ends or the page says bye.
+    // connection ends or the page says bye. Upload chunks and the two
+    // page commands are intercepted rather than ferried.
     let mut buf = vec![0u8; MAX_FRAME];
+    let mut upload: Option<Upload> = None;
     loop {
         tokio::select! {
             n = page.recv(&mut buf) => {
@@ -381,6 +511,58 @@ async fn session(page: &Page, conn: &Connection, host: bool) {
                     break;
                 }
                 let frame = &buf[..n];
+                if frame[0] == TAG_UP_CHUNK {
+                    let Some(u) = upload.as_mut() else { continue };
+                    u.buf.extend_from_slice(&frame[1..]);
+                    if u.buf.len() as u64 >= u.size {
+                        let u = upload.take().expect("upload present");
+                        match store.add_bytes(u.buf).await {
+                            Ok(tag) => {
+                                page.event(
+                                    "added",
+                                    &[
+                                        format!("\"id\":{}", u.id),
+                                        format!("\"hash\":\"{}\"", tag.hash),
+                                        format!("\"size\":{}", u.size),
+                                    ],
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                page.event(
+                                    "file-error",
+                                    &[format!("\"msg\":\"add: {err}\"")],
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Ok(cmd) = serde_json::from_slice::<PageCommand>(frame) {
+                    match cmd {
+                        PageCommand::Send { id, name, size } => {
+                            upload = Some(Upload {
+                                id,
+                                name,
+                                size,
+                                buf: Vec::with_capacity(size as usize),
+                            });
+                            tracing::debug!("upload started: {} ({size} bytes)", upload.as_ref().map(|u| u.name.as_str()).unwrap_or(""));
+                        }
+                        PageCommand::Fetch { hash, size } => {
+                            tokio::spawn(fetch_and_deliver(
+                                endpoint.clone(),
+                                store.clone(),
+                                remote,
+                                hash,
+                                size,
+                                page.clone(),
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 if stream_send.write_all(&(n as u16).to_be_bytes()).await.is_err()
                     || stream_send.write_all(frame).await.is_err()
                 {

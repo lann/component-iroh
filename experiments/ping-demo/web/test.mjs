@@ -135,6 +135,44 @@ try {
   });
   console.log("[harness] join->host ping mirrored");
 
+  // File transfer both ways (stock iroh-blobs under the hood): 2MiB of
+  // pseudorandom bytes, host -> joiner, then joiner -> host. "done" on
+  // the receiver implies the bao verification passed; the sender's
+  // "done" is the receiver's ack.
+  const payload = Buffer.alloc(2 * 1024 * 1024);
+  for (let i = 0; i < payload.length; i++) payload[i] = (i * 2654435761) & 0xff;
+  const fileDone = (name) => (page) =>
+    page.waitForFunction(
+      (n) =>
+        globalThis.__demo.transfers.some(
+          (t) => t.name === n && t.state === "done" && t.dir === "down" && t.bytes === t.size,
+        ),
+      name,
+      { timeout: 60_000 },
+    );
+  const ackDone = (name) => (page) =>
+    page.waitForFunction(
+      (n) => globalThis.__demo.transfers.some((t) => t.name === n && t.state === "done" && t.dir === "up"),
+      name,
+      { timeout: 60_000 },
+    );
+  await host.setInputFiles("#file", {
+    name: "host.bin",
+    mimeType: "application/octet-stream",
+    buffer: payload,
+  });
+  await fileDone("host.bin")(joiner);
+  await ackDone("host.bin")(host);
+  console.log("[harness] file host->join transferred and verified");
+  await joiner.setInputFiles("#file", {
+    name: "join.bin",
+    mimeType: "application/octet-stream",
+    buffer: payload,
+  });
+  await fileDone("join.bin")(host);
+  await ackDone("join.bin")(joiner);
+  console.log("[harness] file join->host transferred and verified");
+
   // A third participant is turned away (single-pair sessions) — then
   // closed, so it cannot race the rejoin scenario below.
   const third = await openPage(context, "third", joinUrl);
