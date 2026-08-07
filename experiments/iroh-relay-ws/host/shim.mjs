@@ -5,9 +5,11 @@
 // pipe), `wasi:random/random` (QUIC/TLS keys), filesystem and
 // ip-name-lookup stubs, and RUST_LOG passthrough. The websocket bridge
 // (bridge.mjs) drives the socket hooks exported at the bottom.
-
-import { performance } from "node:perf_hooks";
-import { randomFillSync } from "node:crypto";
+//
+// Environment-portable: standard globals only (`performance`, `crypto`),
+// Node specifics (`process.hrtime` for nanosecond clocks, `process.env`
+// for RUST_LOG) detected at load. In a browser, set `globalThis.RUST_LOG`
+// before importing to steer guest tracing.
 
 // ---------------------------------------------------------------------------
 // instrumentation
@@ -23,7 +25,12 @@ export const stats = {
 // ---------------------------------------------------------------------------
 // wasi:io/poll
 
-const hrnow = () => process.hrtime.bigint();
+// Nanosecond monotonic clock: process.hrtime under Node; performance.now
+// (100us granularity uncoisolated, 5us with COOP/COEP) in a browser.
+const hrnow =
+  typeof process !== "undefined" && process.hrtime?.bigint
+    ? () => process.hrtime.bigint()
+    : () => BigInt(Math.round(performance.now() * 1e6));
 
 export class Pollable {
   #readyFn;
@@ -173,9 +180,14 @@ export const stderr = { getStderr: () => stderrStream, OutputStream };
 // wasi:cli environment/exit/terminal
 
 export const environment = {
-  // RUST_LOG passes through so guest tracing is steerable from the driver.
-  getEnvironment: () =>
-    process.env.RUST_LOG ? [["RUST_LOG", process.env.RUST_LOG]] : [],
+  // RUST_LOG passes through so guest tracing is steerable from the driver:
+  // the process environment under Node, `globalThis.RUST_LOG` in a browser.
+  getEnvironment: () => {
+    const rustLog =
+      (typeof process !== "undefined" && process.env?.RUST_LOG) ||
+      globalThis.RUST_LOG;
+    return rustLog ? [["RUST_LOG", rustLog]] : [];
+  },
   getArguments: () => ["iroh-relay-ws-guest"],
   initialCwd: () => undefined,
 };
@@ -206,12 +218,15 @@ export const insecureSeed = {
 export const random = {
   getRandomBytes(len) {
     const out = new Uint8Array(Number(len));
-    randomFillSync(out);
+    // getRandomValues caps a single call at 64KiB.
+    for (let i = 0; i < out.length; i += 65536) {
+      crypto.getRandomValues(out.subarray(i, Math.min(i + 65536, out.length)));
+    }
     return out;
   },
   getRandomU64() {
     const buf = new BigUint64Array(1);
-    randomFillSync(buf);
+    crypto.getRandomValues(buf);
     return buf[0];
   },
 };
@@ -482,4 +497,3 @@ export const ipNameLookup = {
   },
 };
 
-export { performance };

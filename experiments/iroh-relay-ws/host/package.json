@@ -6,9 +6,11 @@
   "description": "Spike host: upstream iroh (wasip2, jco/JSPI) with the relay websocket bridged through the polymorph-websocket host module as synthetic datagrams.",
   "scripts": {
     "transpile": "node transpile.mjs",
-    "start": "node --experimental-wasm-jspi run.mjs"
+    "start": "node --experimental-wasm-jspi run.mjs",
+    "test:browser": "node browser-test.mjs"
   },
   "devDependencies": {
-    "@bytecodealliance/jco-transpile": "file:../../../.deps/jco/packages/jco-transpile"
+    "@bytecodealliance/jco-transpile": "file:../../../.deps/jco/packages/jco-transpile",
+    "playwright": "^1.62.1"
   }
 }
