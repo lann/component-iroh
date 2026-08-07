@@ -2013,6 +2013,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.1"
+source = "git+https://github.com/lann/net-tools.git?branch=polymorph-iroh#e877e799bb71112ffaa1aa20de6270162b4d4445"
 dependencies = [
  "atomic-waker",
  "bytes",

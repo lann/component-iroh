@@ -80,7 +80,8 @@ udp-wake:
     cd experiments/udp-wake/host && npm install --no-audit --no-fund && npm run transpile && timeout 120 npm start && timeout 120 npm run start-composed
 
 # The upstream-iroh-over-relay spike (issue #14): the unmodified iroh
-# crate (v1.0.3 + four vendored wasi-enablement patches) as a wasip2
+# crate (upstream main + the wasi-enablement patch branches, from the
+# lann/iroh and lann/net-tools polymorph-iroh branches) as a wasip2
 # component under jco/JSPI, relay-only, the relay websocket bridged
 # through the polymorph-websocket host module as synthetic datagrams.
 # Research probe attached to the issue, so manual: not part of `ci`.

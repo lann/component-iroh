@@ -27,15 +27,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # - the noq family rides the rev carrying noq#773 (wasip2 support for
 #   noq-udp; released 1.1.1 was cut from a pre-merge base, and released
 #   noq requires noq-udp ^1.1.1, so the three must move together).
-# - netwatch stays a vendored 0.19.1 (iroh main still requires ^0.19.1,
-#   and its upstream is n0-computer/net-tools, not the iroh repo):
-#   wasi routes to its netdev-free posix_minimal branch and sockets
-#   close inline on drop (no spawn_blocking on wasi).
+# - netwatch rides the lann/net-tools `polymorph-iroh` branch: the
+#   netwatch-v0.19.1 tag (iroh main still requires ^0.19.1) plus the
+#   wasi patch branches merged — lann/net-tools#1 (wasi routes to the
+#   netdev-free posix_minimal branch), #2 (sockets close inline on
+#   drop; no spawn_blocking on wasi).
 [patch.crates-io]
 noq = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
 noq-proto = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
 noq-udp = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
-netwatch = { path = "../vendor/netwatch" }
+netwatch = { git = "https://github.com/lann/net-tools.git", branch = "polymorph-iroh" }
 
 [profile.release]
 lto = true
