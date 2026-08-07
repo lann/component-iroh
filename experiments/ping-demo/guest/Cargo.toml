@@ -17,13 +17,17 @@ tokio = { version = "1.53", default-features = false, features = ["rt", "macros"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Same wasi enablement patches as the iroh-relay-ws spike, riding the
-# same vendored copies (see that Cargo.toml for the full rationale).
-# iroh-blobs depends on crates-io iroh, so the substitution happens on
-# the crates-io side; the vendored manifest's path deps pull the patched
-# iroh-relay and iroh-dns along.
+# Same wasi enablement patches as the iroh-relay-ws spike, from the
+# lann/iroh `polymorph-iroh` branch (see that Cargo.toml for the full
+# rationale). iroh-blobs depends on crates-io iroh, so the substitution
+# happens on the crates-io side; the branch's path deps pull the
+# patched iroh-relay and iroh-dns along, and iroh-base is patched to
+# the same branch so iroh and iroh-blobs share one copy of its types.
+# netwatch stays vendored (its upstream is n0-computer/net-tools, not
+# the iroh repo).
 [patch.crates-io]
-iroh = { path = "../../iroh-relay-ws/vendor/iroh" }
+iroh = { git = "https://github.com/lann/iroh.git", branch = "polymorph-iroh" }
+iroh-base = { git = "https://github.com/lann/iroh.git", branch = "polymorph-iroh" }
 noq = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
 noq-proto = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }
 noq-udp = { git = "https://github.com/n0-computer/noq.git", rev = "f1ae90533aad86942b7fdc6562744006268989b3" }

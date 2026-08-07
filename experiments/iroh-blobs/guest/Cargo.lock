@@ -1385,6 +1385,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
+source = "git+https://github.com/lann/iroh.git?branch=polymorph-iroh#e52993efe22b367bcaf0e822d5c7fc16996b5af8"
 dependencies = [
  "backon",
  "blake3",
@@ -1433,8 +1434,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6be73e16ee21c923aca9b3121aaa0db936f7c7ecc156ff47b8dac944c68d59a8"
+source = "git+https://github.com/lann/iroh.git?branch=polymorph-iroh#e52993efe22b367bcaf0e822d5c7fc16996b5af8"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1501,6 +1501,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
+source = "git+https://github.com/lann/iroh.git?branch=polymorph-iroh#e52993efe22b367bcaf0e822d5c7fc16996b5af8"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -1563,6 +1564,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
+source = "git+https://github.com/lann/iroh.git?branch=polymorph-iroh#e52993efe22b367bcaf0e822d5c7fc16996b5af8"
 dependencies = [
  "blake3",
  "bytes",
