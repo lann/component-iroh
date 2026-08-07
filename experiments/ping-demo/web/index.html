@@ -1,15 +1,12 @@
 <!doctype html>
 <!-- Ping demo: two browsers, one iroh connection — relay-bootstrapped,
      live-migrated onto a WebRTC data channel (polymorph-iroh PR #25,
-     issue #26). The service worker injects COOP/COEP (GitHub Pages
-     cannot set headers) for cross-origin isolation: 5us timers for the
-     RTT readout. Everything is same-origin, so isolation blocks nothing. -->
+     issue #26). Everything is same-origin and self-contained. -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
     <title>iroh ping — polymorph components</title>
-    <script src="./vendor/coi-serviceworker.js"></script>
     <style>
       html,
       body {

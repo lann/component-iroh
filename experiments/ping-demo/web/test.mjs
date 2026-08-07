@@ -52,8 +52,6 @@ function serve() {
       const body = await readFile(join(SITE, path));
       res.writeHead(200, {
         "content-type": MIME[extname(path)] ?? "application/octet-stream",
-        "cross-origin-opener-policy": "same-origin",
-        "cross-origin-embedder-policy": "require-corp",
       });
       res.end(body);
     } catch {

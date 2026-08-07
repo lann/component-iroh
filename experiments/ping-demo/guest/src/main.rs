@@ -211,17 +211,24 @@ async fn run() {
         .expect("bind endpoint");
 
     let overlay = Overlay::register(&endpoint).await;
-    endpoint.online().await;
 
-    let relay_url = endpoint
-        .addr()
-        .addrs
-        .iter()
-        .find_map(|a| match a {
-            TransportAddr::Relay(url) => Some(url.to_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
+    // Only the host needs to be online (its home relay is the session's
+    // rendezvous, in the QR). The joiner dials the HOST's relay directly;
+    // waiting for its own home relay would only delay the join.
+    let relay_url = if role == "host" {
+        endpoint.online().await;
+        endpoint
+            .addr()
+            .addrs
+            .iter()
+            .find_map(|a| match a {
+                TransportAddr::Relay(url) => Some(url.to_string()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     page.event(
         "ready",
         &[
@@ -279,10 +286,11 @@ async fn run() {
         loop {
             let addr =
                 EndpointAddr::from_parts(peer, [TransportAddr::Relay(peer_relay.clone())]);
-            // Bounded dial: while the host is away (e.g. mid-reload), a
-            // hung attempt must not stall the redial loop.
+            // Bounded dial: generous enough for a slow relay handshake,
+            // bounded so a hung attempt (host mid-reload) cannot stall
+            // the redial loop.
             if let Ok(Ok(conn)) =
-                tokio::time::timeout(Duration::from_secs(5), endpoint.connect(addr, ALPN)).await
+                tokio::time::timeout(Duration::from_secs(10), endpoint.connect(addr, ALPN)).await
             {
                 session(&page, &conn, false).await;
                 page.event("closed", &[]).await;

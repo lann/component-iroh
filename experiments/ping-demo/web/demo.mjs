@@ -66,9 +66,12 @@ const demo = (globalThis.__demo = {
   shim: stats,
 });
 
+const t0 = performance.now();
+
 function setStatus(state, text) {
   demo.state = state;
   statusEl.textContent = text;
+  console.log(`[demo] t+${Math.round(performance.now() - t0)}ms state=${state}`);
 }
 
 // --- guest event channel (synthetic port 3) ---------------------------------

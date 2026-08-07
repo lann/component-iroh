@@ -477,6 +477,15 @@ impl Client {
         let needs_v4_probe = v4_report.is_none();
         let needs_v6_probe = v6_report.is_some() != if_state.have_v6;
 
+        // wasi (spike): QAD probes ride UDP straight to the relay's QUIC
+        // socket, which no wasi host can deliver (the relay leg is a
+        // websocket pipe); every probe would burn the full PROBES_TIMEOUT
+        // and stall the report — and with it home-relay selection and
+        // `Endpoint::online`. External addresses come from the host via
+        // `add_external_addr` instead.
+        #[cfg(wasm_wasi)]
+        let (needs_v4_probe, needs_v6_probe) = (false, false);
+
         let mut reports = Vec::new();
 
         if let Some(report) = v4_report {

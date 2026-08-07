@@ -20,7 +20,7 @@ mkdir -p "$SITE/vendor"
 (cd web && npm run --silent transpile)
 
 cp web/index.html web/demo.mjs web/overlay.mjs "$SITE/"
-cp web/vendor/coi-serviceworker.js web/vendor/qrcode.mjs "$SITE/vendor/"
+cp web/vendor/qrcode.mjs "$SITE/vendor/"
 cp "$SPIKE_HOST/shim.mjs" "$SITE/"
 sed 's|"../../../.deps/websocket/js/jco/websocket.js"|"./vendor/websocket.js"|' \
     "$SPIKE_HOST/bridge.mjs" > "$SITE/bridge.mjs"
