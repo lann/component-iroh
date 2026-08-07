@@ -1,0 +1,14 @@
+{
+  "name": "ping-demo-web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Ping demo page: builds the wasip2 guest transpile and assembles the self-contained static site (see ../build.sh).",
+  "scripts": {
+    "transpile": "node transpile.mjs"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco-transpile": "file:../../../.deps/jco/packages/jco-transpile",
+    "playwright": "1.62.1"
+  }
+}

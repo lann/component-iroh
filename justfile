@@ -80,5 +80,18 @@ udp-wake:
     cd experiments/udp-wake && wac plug guest/target/wasm32-wasip2/release/iroh-udp-wake-guest.wasm --plug virt/target/wasm32-wasip2/release/iroh_udp_wake_virt.wasm -o composed.wasm
     cd experiments/udp-wake/host && npm install --no-audit --no-fund && npm run transpile && timeout 120 npm start && timeout 120 npm run start-composed
 
+# The upstream-iroh-over-relay spike (issue #14): the unmodified iroh
+# crate (upstream main + the wasi-enablement patch branches, from the
+# lann/iroh and lann/net-tools polymorph-iroh branches) as a wasip2
+# component under jco/JSPI, relay-only, the relay websocket bridged
+# through the polymorph-websocket host module as synthetic datagrams.
+# Research probe attached to the issue, so manual: not part of `ci`.
+# Needs the jco fork and the iroh checkout from setup.sh.
+iroh-relay-ws:
+    cd experiments/iroh-relay-ws/guest && cargo build --release
+    cd .deps/iroh && cargo build --release -p iroh-relay --features server --bin iroh-relay
+    cd experiments/iroh-relay-ws/host && npm install --no-audit --no-fund && npm run transpile
+    ./experiments/iroh-relay-ws/run.sh
+
 # The full gate.
 ci: fmt-check clippy validate-wit test probes matrix bench
