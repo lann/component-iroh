@@ -27,14 +27,11 @@ IROH_PIN=816dd70c056b813dcb5cbfb6a9a15e12d04b72b1 # v1.0.3
 TLS_REPO=https://github.com/polymorph-components/polymorph-tls.git
 TLS_PIN=23ceddad816f95f95e282914c8a269cb20413ce3
 # The jco fork: the P3/JSPI transpiler with the async fixes this
-# repository needs (lann/jco all-fixes plus the first two commits of
-# PR #27; the PR's concurrency fixes are excluded until the exec-model
-# probes pass with them — see the PR's verification notes). host-jco
-# consumes packages/jco-transpile as a file: dependency, so this
-# checkout must be built before host-jco's npm install resolves
-# against it.
+# repository needs (lann/jco all-fixes). host-jco consumes
+# packages/jco-transpile as a file: dependency, so this checkout must
+# be built before host-jco's npm install resolves against it.
 JCO_REPO=https://github.com/lann/jco.git
-JCO_PIN=30186b2b1ee0ce7ef9703844b41b0af2456a5476 # PR #27, ponyfill fix
+JCO_PIN=dbad4d7dd03cc022b9614fa1603f839a79f66bc0 # all-fixes: sync-start-call, future/stream transfer, concurrent task lifetimes
 
 log() { printf '\n==> %s\n' "$1"; }
 
