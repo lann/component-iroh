@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- Browser harness for the iroh-blobs spike: loads the same shim,
+     bridges, and transpiled component as the Node driver, under JSPI in
+     the browser. Serve from the repository root so the bridge imports
+     (../../../.deps/...) resolve; driven by browser-test.mjs. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>iroh-blobs spike (browser)</title>
+  </head>
+  <body>
+    <pre id="log">running…</pre>
+    <script type="module" src="./browser-run.mjs"></script>
+  </body>
+</html>
