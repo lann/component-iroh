@@ -294,6 +294,35 @@ interface endpoint {
         /// The next peer-initiated unidirectional stream.
         accept-uni: async func() -> result<recv-stream, error>;
 
+        /// The largest datagram `send-datagram` accepts right now, or
+        /// `none` when the peer does not accept datagrams. Varies with
+        /// the path MTU; under this package's fixed 1200-byte MTU
+        /// profile expect roughly 1.1 KiB between two of these
+        /// endpoints.
+        max-datagram-size: func() -> option<u32>;
+
+        /// Queue one unreliable, unordered datagram (RFC 9221).
+        ///
+        /// Never blocks and never applies backpressure: when the send
+        /// buffer is full, the oldest queued datagrams are dropped to
+        /// make room — loss is this transport's semantics, and a full
+        /// buffer is loss. Delivery is not acknowledged; a datagram
+        /// may be lost anywhere along the path.
+        ///
+        /// Fails with `invalid-argument` when `data` exceeds
+        /// `max-datagram-size`, or when the peer accepts no datagrams
+        /// (`max-datagram-size` returns `none`).
+        send-datagram: func(data: list<u8>) -> result<_, error>;
+
+        /// The next inbound datagram.
+        ///
+        /// Datagrams arrive unordered. Ones that arrive while no call
+        /// is waiting are buffered, bounded; at the bound the oldest
+        /// buffered datagrams are dropped. Concurrent calls are
+        /// supported; concurrently pending receivers are each handed
+        /// one datagram, in an implementation-defined order.
+        recv-datagram: async func() -> result<list<u8>, error>;
+
         /// Close the connection with an application code and reason.
         /// Idempotent; await `wait-closed` for completion. Dropping the
         /// resource without calling `close` implies `close(0, "")`.

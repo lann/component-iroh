@@ -383,10 +383,20 @@ struct App {
     sent_at: Option<Instant>,
     roundtrip_ms: u64,
     received: Option<String>,
+    /// Client: whether the datagram copies went out (after the stream
+    /// echo). Server: unused.
+    datagram_sent: bool,
+    /// Client: the verbatim datagram echo, once received.
+    datagram_received: Option<Vec<u8>>,
     /// Set when this side has nothing left to do but flush and leave.
     done_at: Option<Instant>,
     close_sent: bool,
 }
+
+/// Copies of the demo datagram sent (client) and of each echo (server):
+/// datagrams are lossy by contract; duplication keeps the scripted
+/// exchange deterministic on lossless local wires without retry logic.
+const DATAGRAM_COPIES: usize = 3;
 
 impl App {
     fn new(role: Role) -> Self {
@@ -399,6 +409,8 @@ impl App {
             sent_at: None,
             roundtrip_ms: 0,
             received: None,
+            datagram_sent: false,
+            datagram_received: None,
             done_at: None,
             close_sent: false,
         }
@@ -451,7 +463,34 @@ impl App {
                 }
             }
             Event::Stream(_) => {}
-            Event::DatagramReceived | Event::DatagramsUnblocked => {}
+            // The datagram leg of the exchange: the client's copies
+            // arrive here on the server, which echoes each verbatim (in
+            // copies of its own); the echo arrives here on the client.
+            Event::DatagramReceived => {
+                while let Some(bytes) = conn.datagrams().recv() {
+                    match &self.role {
+                        Role::Client { message } => {
+                            let expect = format!("datagram {message}");
+                            if bytes.as_ref() != expect.as_bytes() {
+                                return Err(format!(
+                                    "datagram echo mismatch: expected {} bytes, got {}",
+                                    expect.len(),
+                                    bytes.len()
+                                ));
+                            }
+                            self.datagram_received = Some(bytes.to_vec());
+                        }
+                        Role::Server => {
+                            for _ in 0..DATAGRAM_COPIES {
+                                conn.datagrams()
+                                    .send(bytes.clone(), true)
+                                    .map_err(|e| format!("datagram echo: {e}"))?;
+                            }
+                        }
+                    }
+                }
+            }
+            Event::DatagramsUnblocked => {}
             Event::ConnectionLost { reason } => match reason {
                 // The peer closing after the exchange is the happy path's
                 // natural end on the server side.
@@ -518,10 +557,20 @@ impl App {
     }
 
     /// Role-specific progression that is not event-driven: the client
-    /// closes once it has its echo.
+    /// sends its datagram copies once it has the stream echo, and closes
+    /// once the datagram echo is back.
     fn drive(&mut self, conn: &mut Connection, _started: Instant) -> Result<(), String> {
-        if let Role::Client { .. } = self.role {
-            if self.received.is_some() && !self.close_sent {
+        if let Role::Client { message } = &self.role {
+            if self.received.is_some() && !self.datagram_sent {
+                let payload = bytes::Bytes::from(format!("datagram {message}").into_bytes());
+                for _ in 0..DATAGRAM_COPIES {
+                    conn.datagrams()
+                        .send(payload.clone(), true)
+                        .map_err(|e| format!("datagram send: {e}"))?;
+                }
+                self.datagram_sent = true;
+            }
+            if self.datagram_received.is_some() && !self.close_sent {
                 conn.close(
                     Instant::now(),
                     VarInt::from_u32(0),

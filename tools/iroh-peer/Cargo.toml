@@ -10,6 +10,7 @@ publish.workspace = true
 # (.deps is excluded from this workspace).
 iroh = { path = "../../.deps/iroh/iroh" }
 
+bytes = "1"
 anyhow = "1"
 hex = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

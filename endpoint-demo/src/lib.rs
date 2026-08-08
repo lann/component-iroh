@@ -37,6 +37,12 @@ const ALPN: &[u8] = b"iroh-demo/0";
 /// Cap on one read call; the demo's payloads are tiny.
 const READ_MAX: u32 = 16 * 1024;
 
+/// Copies of the demo datagram sent (client) and of its echo (server):
+/// datagrams are lossy by contract, and duplication makes the exchange
+/// robust without either side cancelling a pending receive (an
+/// in-flight import subtask must resolve — the jco discipline).
+const DATAGRAM_COPIES: usize = 3;
+
 /// Polling quantum and bound while waiting for the WebRTC upgrade.
 const UPGRADE_POLL_NS: u64 = 5_000_000;
 const UPGRADE_DEADLINE_POLLS: u32 = 30_000 / 5;
@@ -88,7 +94,7 @@ impl Guest for Component {
 
         let report = match config.role {
             Role::Client => run_client(&endpoint, &config).await?,
-            Role::Server => run_server(&endpoint).await?,
+            Role::Server => run_server(&endpoint, &config).await?,
         };
 
         endpoint.close();
@@ -170,6 +176,14 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
             echoed.len()
         ));
     }
+
+    // The datagram leg: send after the stream echo (the connection and
+    // its path are settled), then wait for the server's echo.
+    let datagram = if config.datagram {
+        Some(run_client_datagram(&conn, &config.message).await?)
+    } else {
+        None
+    };
     let path = path_name(conn.path());
 
     conn.close(0, "done");
@@ -186,10 +200,39 @@ async fn run_client(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport
         handshake_ms,
         roundtrip_ms,
         received,
+        datagram,
     })
 }
 
-async fn run_server(endpoint: &Endpoint) -> Result<RunReport, String> {
+/// The client's datagram echo: send `DATAGRAM_COPIES` copies, await one
+/// echo, assert it round-tripped verbatim.
+async fn run_client_datagram(conn: &Connection, message: &str) -> Result<String, String> {
+    let max = conn
+        .max_datagram_size()
+        .ok_or("peer does not accept datagrams")?;
+    let payload = format!("datagram {message}").into_bytes();
+    if payload.len() > max as usize {
+        return Err(format!(
+            "demo datagram ({} bytes) exceeds max-datagram-size ({max})",
+            payload.len()
+        ));
+    }
+    for _ in 0..DATAGRAM_COPIES {
+        conn.send_datagram(&payload)
+            .map_err(fail("send-datagram"))?;
+    }
+    let echoed = conn.recv_datagram().await.map_err(fail("recv-datagram"))?;
+    if echoed != payload {
+        return Err(format!(
+            "datagram echo mismatch: sent {} bytes, got {} bytes",
+            payload.len(),
+            echoed.len()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&echoed).into_owned())
+}
+
+async fn run_server(endpoint: &Endpoint, config: &RunConfig) -> Result<RunReport, String> {
     let conn = endpoint.accept().await.map_err(fail("accept"))?;
     let (send, recv) = conn.accept_bi().await.map_err(fail("accept-bi"))?;
 
@@ -210,6 +253,19 @@ async fn run_server(endpoint: &Endpoint) -> Result<RunReport, String> {
     };
     send.write(echo).await.map_err(fail("write"))?;
     send.finish().map_err(fail("finish"))?;
+
+    // The datagram leg: receive one (the client sends copies), echo it
+    // verbatim in copies of our own.
+    let datagram = if config.datagram {
+        let payload = conn.recv_datagram().await.map_err(fail("recv-datagram"))?;
+        for _ in 0..DATAGRAM_COPIES {
+            conn.send_datagram(&payload)
+                .map_err(fail("send-datagram"))?;
+        }
+        Some(String::from_utf8_lossy(&payload).into_owned())
+    } else {
+        None
+    };
     let path = path_name(conn.path());
 
     // The client closes once it has its echo; that close is the demo's
@@ -223,6 +279,7 @@ async fn run_server(endpoint: &Endpoint) -> Result<RunReport, String> {
         handshake_ms: 0,
         roundtrip_ms: 0,
         received,
+        datagram,
     })
 }
 
