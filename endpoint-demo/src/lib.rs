@@ -24,7 +24,9 @@ mod bindings {
 }
 
 use bindings::exports::polymorph::iroh_demo::demo::{Guest, Role, RunConfig, RunReport};
-use bindings::polymorph::iroh::endpoint::{Connection, Endpoint, EndpointOptions, Identity};
+use bindings::polymorph::iroh::endpoint::{Connection, Endpoint, EndpointOptions};
+use bindings::polymorph::iroh::identity_from_keys::from_keys;
+use bindings::polymorph::iroh::identity_generate::generate;
 use bindings::polymorph::iroh::types::{EndpointAddr, Error, PathKind, TransportAddr};
 use bindings::wasi::clocks::monotonic_clock;
 use polymorph_webcrypto_guest::{ed25519, SigningKeyOptions};
@@ -43,42 +45,37 @@ struct Component;
 
 impl Guest for Component {
     async fn run(config: RunConfig) -> Result<RunReport, String> {
-        // The injected-identity path: mint the pair here, hand it to
-        // bind, and require the endpoint to adopt it.
-        let (identity, expected_id) = if config.inject_identity {
+        // The identity is explicit: constructed through one of the
+        // constructor interfaces, then handed to the options. The
+        // inject-identity path exercises from-keys (webcrypto handles
+        // crossing the composition); the default path exercises
+        // generate.
+        let identity = if config.inject_identity {
             let (signing, verifying) = ed25519::generate_key(SigningKeyOptions {
                 sign: true,
                 extractable: false,
             })
             .await
-            .map_err(|e| format!("mint identity: {e}"))?;
-            let expected = verifying
-                .export_key_raw()
+            .map_err(|e| format!("mint identity keys: {e}"))?;
+            from_keys(signing.into_raw(), verifying.into_raw())
                 .await
-                .map_err(|e| format!("export minted public key: {e}"))?;
-            let identity = Identity {
-                signing_key: signing.into_raw(),
-                verifying_key: verifying.into_raw(),
-            };
-            (Some(identity), Some(expected))
+                .map_err(fail("from-keys"))?
         } else {
-            (None, None)
+            generate().await.map_err(fail("generate"))?
         };
+        let expected_id = identity.endpoint_id();
 
-        let endpoint = Endpoint::bind(EndpointOptions {
-            alpns: vec![ALPN.to_vec()],
-            relay_url: Some(config.relay_url.clone()),
-            udp_bind_addr: config.udp_bind.clone(),
-            webrtc: config.webrtc,
-            identity,
-        })
-        .await
-        .map_err(fail("bind"))?;
+        let options = EndpointOptions::new(&identity);
+        options.add_alpn(ALPN);
+        options.relay_url(&config.relay_url);
+        if let Some(udp_bind) = &config.udp_bind {
+            options.udp_bind_addr(udp_bind);
+        }
+        options.webrtc(config.webrtc);
+        let endpoint = Endpoint::bind(options).await.map_err(fail("bind"))?;
 
-        if let Some(expected) = expected_id {
-            if endpoint.id() != expected {
-                return Err("bind did not adopt the injected identity".into());
-            }
+        if endpoint.id() != expected_id {
+            return Err("bind did not adopt the supplied identity".into());
         }
 
         // The driver hands this ID to the peer process.

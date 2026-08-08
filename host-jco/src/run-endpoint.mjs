@@ -9,7 +9,10 @@
 //   npm run start-endpoint -- --role client --relay http://127.0.0.1:3340 --peer <endpoint-id>
 import { parseArgs } from "node:util";
 
-import { endpoint as iroh } from "../generated-endpoint/iroh-endpoint.js";
+import {
+  endpoint as iroh,
+  identityGenerate,
+} from "../generated-endpoint/iroh-endpoint.js";
 
 const ALPN = new TextEncoder().encode("iroh-demo/0");
 const READ_MAX = 16 * 1024;
@@ -53,7 +56,11 @@ async function main() {
     );
   }
 
-  const ep = await iroh.Endpoint.bind({ alpns: [ALPN], relayUrl: relay, webrtc: false });
+  const identity = await identityGenerate.generate();
+  const options = new iroh.EndpointOptions(identity);
+  options.addAlpn(ALPN);
+  options.relayUrl(relay);
+  const ep = await iroh.Endpoint.bind(options);
   console.log(`endpoint-id ${hex(ep.id())}`);
 
   let report;

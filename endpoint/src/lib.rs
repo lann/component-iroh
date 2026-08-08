@@ -20,6 +20,7 @@
 //! and `bind` requires a home relay URL.
 
 mod endpoint_impl;
+mod identity;
 mod udp;
 mod webrtc;
 

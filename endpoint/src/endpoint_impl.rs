@@ -37,14 +37,15 @@ use iroh_endpoint_core::tls;
 use polymorph_tls_quic::{HandshakeData, QuicClientConfig, QuicServerConfig, ResetKey, TokenKey};
 
 use crate::bindings::exports::polymorph::iroh::endpoint::{
-    Connection, Endpoint, EndpointOptions, Guest, GuestConnection, GuestEndpoint, GuestRecvStream,
-    GuestSendStream, RecvStream, SendStream,
+    Connection, Endpoint, EndpointOptions, Guest, GuestConnection, GuestEndpoint,
+    GuestEndpointOptions, GuestRecvStream, GuestSendStream, IdentityBorrow, RecvStream, SendStream,
 };
 use crate::bindings::polymorph::iroh::types::{
     ConnectionState, EndpointAddr, Error, PathKind, TransportAddr,
 };
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::bindings::wit_stream;
+use crate::identity::IdentityRes;
 use crate::udp::UdpWire;
 use crate::webrtc::{self, ChannelWire, SIGNAL_PREFIX};
 use crate::Component;
@@ -982,6 +983,7 @@ pub struct RecvStreamRes {
 
 impl Guest for Component {
     type Endpoint = EndpointRes;
+    type EndpointOptions = EndpointOptionsRes;
     type Connection = ConnectionRes;
     type SendStream = SendStreamRes;
     type RecvStream = RecvStreamRes;
@@ -1034,25 +1036,73 @@ impl EndpointRes {
     }
 }
 
+/// The `endpoint-options` resource: the identity (cloned out of the
+/// borrowed resource at construction, so one identity configures any
+/// number of endpoints) plus the knobs, defaulting to nothing granted.
+pub(crate) struct EndpointOptionsRes {
+    state: RefCell<OptionsState>,
+}
+
+struct OptionsState {
+    identity: Rc<Identity>,
+    alpns: Vec<Vec<u8>>,
+    relay_url: Option<String>,
+    udp_bind_addr: Option<String>,
+    webrtc: bool,
+}
+
+impl GuestEndpointOptions for EndpointOptionsRes {
+    fn new(identity: IdentityBorrow<'_>) -> Self {
+        let identity = identity.get::<IdentityRes>().inner.clone();
+        Self {
+            state: RefCell::new(OptionsState {
+                identity,
+                alpns: Vec::new(),
+                relay_url: None,
+                udp_bind_addr: None,
+                webrtc: false,
+            }),
+        }
+    }
+
+    fn add_alpn(&self, alpn: Vec<u8>) {
+        self.state.borrow_mut().alpns.push(alpn);
+    }
+
+    fn relay_url(&self, url: String) {
+        self.state.borrow_mut().relay_url = Some(url);
+    }
+
+    fn udp_bind_addr(&self, addr: String) {
+        self.state.borrow_mut().udp_bind_addr = Some(addr);
+    }
+
+    fn webrtc(&self, enabled: bool) {
+        self.state.borrow_mut().webrtc = enabled;
+    }
+}
+
 impl GuestEndpoint for EndpointRes {
     async fn bind(options: EndpointOptions) -> Result<Endpoint, Error> {
-        let relay_url = options.relay_url.clone().ok_or(Error::InvalidArgument(
+        let OptionsState {
+            identity,
+            alpns,
+            relay_url,
+            udp_bind_addr,
+            webrtc,
+        } = options
+            .into_inner::<EndpointOptionsRes>()
+            .state
+            .into_inner();
+        let relay_url = relay_url.ok_or(Error::InvalidArgument(
             "bind requires a relay-url (the relay wire is the only path yet)".into(),
         ))?;
-        if options.alpns.is_empty() {
+        if alpns.is_empty() {
             return Err(Error::InvalidArgument(
                 "bind requires at least one alpn".into(),
             ));
         }
 
-        let identity = match options.identity {
-            Some(injected) => {
-                Identity::from_injected(injected.signing_key.into(), injected.verifying_key.into())
-                    .await
-                    .map_err(Error::InvalidArgument)?
-            }
-            None => Identity::generate().await.map_err(other)?,
-        };
         let relay = RelayConn::connect(&relay_url, &identity)
             .await
             .map_err(Error::ConnectFailed)?;
@@ -1062,7 +1112,7 @@ impl GuestEndpoint for EndpointRes {
         let mut token_master = [0u8; 32];
         getrandom::fill(&mut token_master).map_err(other)?;
 
-        let server_tls = tls::server_config(&identity, options.alpns.clone()).map_err(other)?;
+        let server_tls = tls::server_config(&identity, alpns).map_err(other)?;
         let server_quic_tls = QuicServerConfig::try_from(Arc::new(server_tls))
             .map_err(|e| Error::Other(format!("server quic config: {e}")))?;
         let mut server_config = ServerConfig::new(
@@ -1076,14 +1126,14 @@ impl GuestEndpoint for EndpointRes {
             true,
         );
 
-        let udp = match &options.udp_bind_addr {
+        let udp = match &udp_bind_addr {
             Some(bind_addr) => Some(Rc::new(
                 UdpWire::bind(bind_addr).map_err(Error::InvalidArgument)?,
             )),
             None => None,
         };
 
-        let shared = Rc::new(RefCell::new(State::new(noq, options.webrtc)));
+        let shared = Rc::new(RefCell::new(State::new(noq, webrtc)));
         // The home relay takes pool key HOME_RELAY; the pump arms its
         // receive on the first turn.
         shared
@@ -1093,7 +1143,7 @@ impl GuestEndpoint for EndpointRes {
 
         Ok(Endpoint::new(EndpointRes {
             shared,
-            identity: Rc::new(identity),
+            identity,
             udp,
         }))
     }
