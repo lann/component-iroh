@@ -1,0 +1,110 @@
+package polymorph:webcrypto@0.1.0;
+
+/// PBKDF2 (RFC 8018) passwords: the hash-independent half of the PBKDF2
+/// surface. The `password` resource minted here parameterizes derivations
+/// through the per-hash prepare interfaces (`pbkdf2-sha2`,
+/// `pbkdf2-sha1`), so one imported password serves either hash family.
+///
+/// Security:
+/// - No operation returns a `password`'s bytes, under any grant:
+///   WebCrypto's forced non-extractability on PBKDF2 base keys, made
+///   structural.
+/// - The implementation holds an imported password in memory for the
+///   resource's construction-to-drop lifetime; that window is the
+///   secret's exposure to memory side channels. Import late, drop early.
+///   Dropping releases (and, in scrubbing implementations, zeroizes) it.
+interface pbkdf2 {
+    use types.{error};
+    use derivation.{derive-options};
+    use wrapping.{unwrap-input};
+
+    /// A password: consumable only by `prepare`, never readable. Usage
+    /// grants are fixed at import and copied to every input prepared from
+    /// it.
+    resource password {
+        /// Whether inputs prepared from this password may yield raw bits.
+        can-derive-bits: func() -> bool;
+        /// Whether inputs prepared from this password may mint keys.
+        can-derive-key: func() -> bool;
+    }
+
+    /// Import a password.
+    ///
+    /// *Empty* passwords are accepted, unlike `hkdf.import-ikm`: RFC 8018
+    /// admits an empty `P` and the platform serves it. Fails
+    /// `error.not-permitted` if `options` grants nothing, per the
+    /// package-wide options contract (see `README.md`).
+    import-password: async func(raw: list<u8>, options: derive-options) -> result<password, error>;
+
+    /// Mint a password from unwrapped bytes (see the `wrapping`
+    /// interface), subject to `import-password`'s contract. See
+    /// `hkdf.unwrap-ikm` for the model — the grants come from `options`
+    /// alone, and non-extractability stays structural. `input` is
+    /// consumed.
+    unwrap-password: async func(input: unwrap-input, options: derive-options) -> result<password, error>;
+}
+
+/// PBKDF2 (RFC 8018) over the SHA-2 hash family: password-based key
+/// derivation, as the Web Cryptography API serves it.
+///
+/// Like `hkdf-sha2`, this interface mints no keys. It mints
+/// `derive-input`s — parameterized derivations — which the key-minting
+/// interfaces' `derive-key` functions consume, and which yield raw output
+/// through `derivation.derive-input.derive-bits`. The `password` resource
+/// and its import stay `pbkdf2`'s, so one imported password can
+/// parameterize derivations of either hash family.
+///
+/// There is deliberately no `prepare-from` here: adopting another
+/// derivation's output as a *password* inverts the primitive's purpose.
+/// `hkdf-sha2.prepare-from` is the chaining path.
+interface pbkdf2-sha2 {
+    use types.{error};
+    use sha2.{sha2-variant};
+    use pbkdf2.{password};
+    use derivation.{derive-input};
+
+    /// Parameterize a derivation: `salt` and the iteration count are
+    /// bound now, and the output length arrives per use (the platform's
+    /// own split — `Pbkdf2Params` at `deriveBits`, length from the
+    /// target's get-key-length at `deriveKey`).
+    ///
+    /// Security:
+    /// - `iterations` is the work factor: it is the only brake on
+    ///   brute-force attack against the password. Use the largest count
+    ///   your latency budget allows.
+    /// - Use a unique random `salt` per password, so equal passwords do
+    ///   not derive equal keys and precomputed tables do not apply.
+    ///
+    /// A zero iteration count fails `error.other`, the platform's
+    /// `OperationError` (RFC 8018 requires a positive count), checked here
+    /// rather than at use so a misparameterized input cannot mint. An
+    /// implementation not serving the variant fails `error.unsupported`
+    /// (the truncated SHA-2 variants are unserved package-wide).
+    ///
+    /// Unlike `hkdf-sha2.prepare`, running the derivation early cannot
+    /// discard the base secret entirely: PBKDF2 has no extract step, so
+    /// the input retains password-derived keyed state (the PRF's key
+    /// schedule) for its lifetime — equivalent in sensitivity to HKDF's
+    /// retained PRK, and still not the raw password bytes.
+    prepare: async func(%variant: sha2-variant, input: borrow<password>, salt: list<u8>, iterations: u32) -> result<derive-input, error>;
+}
+
+/// PBKDF2 (RFC 8018) over HMAC-SHA-1, for interoperability with
+/// SHA-1-committed derivations — WPA2-PSK, Kerberos RFC 3962
+/// string-to-key, WinZip AE-2, and their contemporaries. The construction
+/// is HMAC-based, so SHA-1's collision breaks do not reach it (see
+/// `hmac-sha1`'s Security notes); prefer the SHA-2 parameterizations in
+/// new designs.
+///
+/// This interface adds only the SHA-1 `prepare` step: the `password`
+/// resource and its import stay `pbkdf2`'s, so one imported password can
+/// parameterize derivations of either hash family.
+interface pbkdf2-sha1 {
+    use types.{error};
+    use pbkdf2.{password};
+    use derivation.{derive-input};
+
+    /// Parameterize a PBKDF2-HMAC-SHA-1 derivation. See
+    /// `pbkdf2-sha2.prepare` for the `salt` and `iterations` contracts.
+    prepare: async func(input: borrow<password>, salt: list<u8>, iterations: u32) -> result<derive-input, error>;
+}

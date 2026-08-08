@@ -1,0 +1,34 @@
+package polymorph:webcrypto@0.1.0;
+
+/// SHA-2 digest minting (FIPS 180-4), and the home of the `sha2-variant`
+/// enum every SHA-2-parameterized interface shares (`hmac-sha2` uses it
+/// too).
+///
+/// Digests returned here drive `digest.digest.compute`.
+interface sha2 {
+    use types.{error};
+    use digest.{digest};
+
+    /// The SHA-2 variants: FIPS 180-4 closes this set, so it is an enum.
+    /// (Each algorithm interface names its closed set of parameterizations
+    /// `<algorithm>-variant`.)
+    enum sha2-variant {
+        /// Not widely supported: WebCrypto serves only SHA-256/384/512, and
+        /// no current implementation of this package serves the truncated
+        /// variants — expect `error.unsupported` unless composed with a
+        /// provider that specifically offers them.
+        sha224,
+        sha256,
+        sha384,
+        sha512,
+        /// Not widely supported (see `sha224`).
+        sha512-224,
+        /// Not widely supported (see `sha224`).
+        sha512-256,
+    }
+
+    /// A `digest` bound to the declared SHA-2 variant. Fails with
+    /// `error.unsupported` if this implementation does not serve the
+    /// variant.
+    make-digest: func(%variant: sha2-variant) -> result<digest, error>;
+}

@@ -1,0 +1,101 @@
+package polymorph:webcrypto@0.1.0;
+
+/// Ed25519 verification-key minting (RFC 8032).
+///
+/// Ed25519 has no parameters: 32-byte public keys, 64-byte signatures.
+/// Keys report `algorithm-name` `"Ed25519"` and `none` for curve and hash.
+///
+/// Security — the verification criterion. RFC 8032 leaves edge cases open
+/// and real implementations disagree on them; divergent verify results
+/// across providers is a vulnerability class, so this interface pins one
+/// policy:
+/// - Keys minted here verify with the *cofactorless* equation
+///   (`[S]B = R + [k]A`).
+/// - Implementations MUST reject signatures with a non-canonical scalar
+///   (`S ≥ L`), a non-canonically-encoded or small-order `R`, and keys
+///   with a non-canonically-encoded or small-order `A` — the strict
+///   semantics of ed25519-dalek's `verify_strict`.
+/// - Whether a degenerate `A` is rejected at import
+///   (`error.invalid-key`) or at verification
+///   (`error.authentication-failed`) is implementation-defined; the
+///   guarantee is that no signature ever verifies under one.
+/// - Inputs with *mixed-order* (torsion-component, not small-order) `A`
+///   or `R` are the remaining freedom: they verify iff the cofactorless
+///   equation holds.
+///
+/// None of the rejected inputs can be produced by an honest RFC 8032
+/// signer, so this strictness costs no interoperability.
+interface ed25519-verify {
+    use types.{error};
+    use signature.{verifying-key};
+
+    /// Import a 32-byte raw public key (RFC 8032 encoding). Material of
+    /// any other length fails with `error.invalid-key`; a non-canonical or
+    /// small-order encoding is rejected here or at verification, per the
+    /// interface's verification criterion.
+    import-verifying-key-raw: async func(raw: list<u8>) -> result<verifying-key, error>;
+
+    /// Import a public key as an X.509 SubjectPublicKeyInfo (DER, RFC
+    /// 8410 algorithm id 1.3.101.112). The embedded point is subject to
+    /// the same strict criterion as `import-verifying-key-raw`.
+    import-verifying-key-spki: async func(spki: list<u8>) -> result<verifying-key, error>;
+
+    /// Import a public key as an RFC 8037 OKP public JWK (`kty: "OKP"`,
+    /// `crv: "Ed25519"`, `x`). `jwk` is the JWK as JSON text; see
+    /// `mac-key.export-key-jwk` for the package-wide JWK contract. An
+    /// `alg` member, when present, must be `"Ed25519"` or `"EdDSA"`. The
+    /// same strict point criterion applies.
+    import-verifying-key-jwk: async func(jwk: string) -> result<verifying-key, error>;
+}
+
+/// Ed25519 signing-key minting (RFC 8032).
+///
+/// Split from `ed25519-verify` so a provider can serve verification alone.
+/// Ed25519 signing is constant-time by construction (no per-signature
+/// secret nonce, complete addition laws), so providers in shared timing
+/// domains can serve it (see `README.md`, "Timing-channel policy").
+///
+/// Signing keys import as PKCS#8 or an OKP private JWK — the platform
+/// pass-through formats — and never as a bare seed (see `README.md`,
+/// "Design notes", the format-admission rule). Imports return only the
+/// signing key; the public half is supplied separately via
+/// `ed25519-verify` (there is no derive from a private import).
+interface ed25519-sign {
+    use types.{error};
+    use signature.{signing-key, signing-key-options, verifying-key};
+    use wrapping.{unwrap-input};
+
+    /// Generate a fresh random signing key, returning both halves — the
+    /// only point at which every provider is guaranteed to have the public
+    /// key on hand.
+    generate-key: async func(options: signing-key-options) -> result<tuple<signing-key, verifying-key>, error>;
+
+    /// Import a signing key as a PKCS#8 PrivateKeyInfo (DER, RFC 8410:
+    /// the 32-byte seed in a CurvePrivateKey). Wrong OIDs and malformed
+    /// DER fail with `error.invalid-key`.
+    import-signing-key-pkcs8: async func(pkcs8: list<u8>, options: signing-key-options) -> result<signing-key, error>;
+
+    /// Import a signing key as an RFC 8037 OKP private JWK
+    /// (`kty: "OKP"`, `crv: "Ed25519"`, with `x` and `d` both required;
+    /// an `alg` member, when present, must be `"Ed25519"` or `"EdDSA"`).
+    /// Implementations MAY reject a JWK whose `x` is not the public key
+    /// of `d`, and MUST NOT trust `x` for any operation. See
+    /// `mac-key.export-key-jwk` for the package-wide JWK contract.
+    import-signing-key-jwk: async func(jwk: string, options: signing-key-options) -> result<signing-key, error>;
+
+    /// Mint a signing key from unwrapped key material (see the `wrapping`
+    /// interface): `input`'s bytes are read as a PKCS#8 PrivateKeyInfo,
+    /// subject to `import-signing-key-pkcs8`'s contract. `input` is
+    /// consumed.
+    ///
+    /// The minted key's usages and extractability come from `options`
+    /// alone (the W3C Web Cryptography API's `unwrapKey` model).
+    unwrap-signing-key-pkcs8: async func(input: unwrap-input, options: signing-key-options) -> result<signing-key, error>;
+
+    /// Mint a signing key from unwrapped key material read as an OKP
+    /// private JWK, subject to `import-signing-key-jwk`'s contract plus
+    /// the unwrap-path `use`/`key_ops` checks (see `README.md`, "JWK
+    /// contract"). `input` is consumed; see `unwrap-signing-key-pkcs8`
+    /// for the options model.
+    unwrap-signing-key-jwk: async func(input: unwrap-input, options: signing-key-options) -> result<signing-key, error>;
+}

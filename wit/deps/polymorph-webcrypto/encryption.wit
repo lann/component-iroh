@@ -1,0 +1,154 @@
+package polymorph:webcrypto@0.1.0;
+
+/// The `public-encryption` primitive kind: asymmetric encryption. Anyone
+/// holding the public key encrypts; only the private-key holder decrypts.
+/// The dominant use is key transport — wrapping a symmetric key to a
+/// recipient — so the wrap operations sit beside encrypt/decrypt, riding
+/// the same provider-held intermediates as the `key-wrap` kind (see the
+/// `wrapping` interface).
+///
+/// Operations take and return whole byte lists rather than streams — the
+/// one kind that does. The plaintext is bounded by the key (for RSA-OAEP,
+/// the modulus length minus the padding overhead), so there is no
+/// unbounded data to stream; a payload above the bound fails with the
+/// named extension condition on `encrypt`/`wrap`.
+///
+/// Security:
+/// - Encryption is randomized: encrypting one plaintext twice yields
+///   different ciphertexts, and both decrypt.
+/// - `decrypt` and `unwrap` fail with one detail-free error
+///   (`error.authentication-failed`): a wrong-length ciphertext, damaged
+///   padding, and a mismatched label are indistinguishable, as RFC 8017
+///   requires — a distinguishable verdict is a padding-oracle amplifier.
+interface public-encryption {
+    use types.{error};
+    use wrapping.{wrap-input, unwrap-input};
+
+    /// Mint-time policy for `decryption-key`s, following the package-wide
+    /// options contract (see `README.md`). The two grants separate
+    /// disclosure from minting: `decrypt` returns plaintext to the
+    /// caller, while `unwrap` mints keys whose material the caller never
+    /// sees — a key granted only `can-unwrap` cannot leak what it
+    /// transports (the `derive-bits`/`derive-key` split's reasoning).
+    resource decryption-key-options {
+        constructor();
+        /// Whether the minted key may `decrypt`. Disabled by default.
+        can-decrypt: func(allowed: bool);
+        /// Whether the minted key may `unwrap`. Disabled by default.
+        can-unwrap: func(allowed: bool);
+        /// Whether the minted key's material may be exported
+        /// (`decryption-key.export-key-jwk`/`-pkcs8` and the
+        /// `to-wrap-input-*` functions). Disabled by default.
+        extractable: func(allowed: bool);
+    }
+
+    /// A public key: encryption and wrapping, secret-free to hold.
+    resource encryption-key {
+        /// Encrypt a plaintext bounded by the key. `label` is optional
+        /// context bound into the padding: decryption succeeds only
+        /// under the same label (WebCrypto's `RsaOaepParams.label`).
+        /// A plaintext above the key's bound fails `error.extension`
+        /// — origin `"polymorph:webcrypto"`, name `"message-too-long"` —
+        /// the signal to switch to hybrid wrapping (encrypt a symmetric
+        /// key, wrap the payload under it).
+        encrypt: async func(label: option<list<u8>>, plaintext: list<u8>) -> result<list<u8>, error>;
+
+        /// Wrap key material serialized as a `wrap-input` (see the
+        /// `wrapping` interface): the material transits neither caller.
+        /// The serialized form must fit the key's bound — symmetric-key
+        /// JWKs do, private-key serializations generally do not — else
+        /// `error.extension` `"message-too-long"`, as on `encrypt`.
+        wrap: async func(label: option<list<u8>>, input: wrap-input) -> result<list<u8>, error>;
+
+        /// The registry name of the algorithm family this key is bound
+        /// to, e.g. `"RSA-OAEP"` (WebCrypto's `KeyAlgorithm.name`).
+        algorithm-name: func() -> string;
+
+        /// The digest bound at mint, e.g. `"SHA-256"`.
+        algorithm-hash: func() -> option<string>;
+
+        /// The key's length in bits for algorithms parameterized by one
+        /// (the RSA modulus length).
+        algorithm-length: func() -> option<u32>;
+
+        /// The public exponent for RSA-family keys, as WebCrypto's
+        /// `RsaKeyAlgorithm.publicExponent` denominates it: the
+        /// exponent's big-endian bytes (`[1, 0, 1]` for 65537). `none`
+        /// for algorithms without one.
+        algorithm-public-exponent: func() -> option<list<u8>>;
+
+        /// The public key material, in the minting interface's documented
+        /// public format; algorithms without a raw public form (the RSA
+        /// family) fail `error.unsupported`. No extractability gate —
+        /// public keys are unconditionally exportable — but still
+        /// fallible: a provider may hold a handle it can use but not
+        /// read (see `README.md`, "Extractability").
+        export-key-raw: async func() -> result<list<u8>, error>;
+
+        /// The public key as an X.509 SubjectPublicKeyInfo (DER), with
+        /// the same fallibility as `export-key-raw`.
+        export-key-spki: async func() -> result<list<u8>, error>;
+
+        /// The public key as a JWK. See `mac-key.export-key-jwk` for the
+        /// package-wide JWK contract; the same fallibility applies.
+        export-key-jwk: async func() -> result<string, error>;
+    }
+
+    /// A private key. `decrypt` and `unwrap` are one-shot on the
+    /// immutable key; the extractability contract in `README.md` applies.
+    resource decryption-key {
+        /// Decrypt a ciphertext produced by the matching public key
+        /// under the same `label`. Fails `error.not-permitted` without
+        /// the `can-decrypt` grant; every decryption failure is the one
+        /// detail-free `error.authentication-failed` (see the interface
+        /// doc).
+        decrypt: async func(label: option<list<u8>>, ciphertext: list<u8>) -> result<list<u8>, error>;
+
+        /// Decrypt a wrapped key into an `unwrap-input` for a typed
+        /// unwrap mint (see the `wrapping` interface): the material
+        /// never reaches the caller. Fails `error.not-permitted` without
+        /// the `can-unwrap` grant; failures are otherwise as `decrypt`.
+        unwrap: async func(label: option<list<u8>>, ciphertext: list<u8>) -> result<unwrap-input, error>;
+
+        /// See `encryption-key.algorithm-name`.
+        algorithm-name: func() -> string;
+
+        /// See `encryption-key.algorithm-hash`.
+        algorithm-hash: func() -> option<string>;
+
+        /// See `encryption-key.algorithm-length`.
+        algorithm-length: func() -> option<u32>;
+
+        /// See `encryption-key.algorithm-public-exponent`.
+        algorithm-public-exponent: func() -> option<list<u8>>;
+
+        /// Whether this key may `decrypt`. See
+        /// `decryption-key-options.can-decrypt`.
+        can-decrypt: func() -> bool;
+
+        /// Whether this key may `unwrap`. See
+        /// `decryption-key-options.can-unwrap`.
+        can-unwrap: func() -> bool;
+
+        /// Whether the export functions may return this key's material.
+        /// See `decryption-key-options.extractable`.
+        extractable: func() -> bool;
+
+        /// The private key as a JWK, behind the extractability gate and
+        /// fallible beyond it like every export (`README.md`,
+        /// "Extractability").
+        export-key-jwk: async func() -> result<string, error>;
+
+        /// The private key as a PKCS#8 PrivateKeyInfo (DER), behind the
+        /// same gate.
+        export-key-pkcs8: async func() -> result<list<u8>, error>;
+
+        /// The private-key JWK serialization as a `wrap-input`, for
+        /// wrapping under another key. Behind the extractability gate.
+        to-wrap-input-jwk: async func() -> result<wrap-input, error>;
+
+        /// The PKCS#8 serialization as a `wrap-input`, behind the same
+        /// gate.
+        to-wrap-input-pkcs8: async func() -> result<wrap-input, error>;
+    }
+}

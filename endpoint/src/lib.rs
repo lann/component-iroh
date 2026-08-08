@@ -20,6 +20,7 @@
 //! and `bind` requires a home relay URL.
 
 mod endpoint_impl;
+mod identity;
 mod udp;
 mod webrtc;
 
@@ -33,9 +34,18 @@ pub(crate) mod bindings {
         // equal `stream-message` is then the only stream payload generated
         // in this crate — two in one generation collide under wit-bindgen
         // 0.59's structural canonicalization of stream payloads.
+        //
+        // The webcrypto interfaces are bound once in polymorph-webcrypto-guest,
+        // whose newtypes wrap only that generation; `endpoint-options.identity`
+        // carries `signature` handles, so those interfaces (and their type
+        // dependencies) must resolve to the same resource types the SDK
+        // wraps.
         with: {
             "polymorph:websocket/types@0.1.0": iroh_endpoint_core::bindings::polymorph::websocket::types,
             "polymorph:websocket/connections@0.1.0": iroh_endpoint_core::bindings::polymorph::websocket::connections,
+            "polymorph:webcrypto/types@0.1.0": polymorph_webcrypto_guest::bindings::types,
+            "polymorph:webcrypto/wrapping@0.1.0": polymorph_webcrypto_guest::bindings::wrapping,
+            "polymorph:webcrypto/signature@0.1.0": polymorph_webcrypto_guest::bindings::signature,
         },
     });
 }

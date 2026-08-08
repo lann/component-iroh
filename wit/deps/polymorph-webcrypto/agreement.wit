@@ -1,0 +1,134 @@
+package polymorph:webcrypto@0.1.0;
+
+/// The `key-agreement` primitive kind: two-party Diffie–Hellman-style
+/// agreement, producing keying material as a `derive-input` rather than as
+/// bytes.
+///
+/// This kind has no secret-free half to split off (compare `signature`'s
+/// `-verify`/`-sign` interfaces): every operation involves the secret key,
+/// and the public key exists to be exchanged. There is deliberately no way
+/// to derive a `public-key` from a `secret-key`: the public half is
+/// available where it is guaranteed to exist — `generate-key` returns the
+/// pair, and an imported secret's JWK carries its public coordinate — while
+/// a provider may hold a secret it can use but not read (see `README.md`,
+/// "Design notes").
+///
+/// Security:
+/// - `agree` combines two key resources, so mixing algorithms (an X25519
+///   secret with an ECDH public) is *representable* — the one place in
+///   the package where misuse is checked rather than unrepresentable,
+///   because an operation takes two capabilities. The check is the W3C
+///   Web Cryptography API's own: an algorithm mismatch — including a
+///   curve mismatch between two ECDH keys — fails `error.invalid-key`.
+interface key-agreement {
+    use types.{error};
+    use derivation.{derive-input};
+    use wrapping.{wrap-input};
+
+    /// Mint-time policy for agreement secret keys, following the
+    /// package-wide options contract (see `README.md`). The derive grants
+    /// are the W3C Web Cryptography API's usage pair for agreement keys,
+    /// and flow to every `derive-input` the key's `agree` mints.
+    /// `extractable` gates the secret-key exports (`export-key-jwk`/
+    /// `-pkcs8` and the `to-wrap-input-*` functions); platform key
+    /// storage honors it too (the `signing-key` precedent).
+    resource agreement-key-options {
+        constructor();
+        /// Whether inputs agreed by the minted key may yield raw bits.
+        /// Disabled by default.
+        can-derive-bits: func(allowed: bool);
+        /// Whether inputs agreed by the minted key may mint keys. Disabled
+        /// by default.
+        can-derive-key: func(allowed: bool);
+        /// Whether the minted key's material may be exported
+        /// (`secret-key.export-key-jwk`/`-pkcs8`). Disabled by default.
+        extractable: func(allowed: bool);
+    }
+
+    /// A public key: exchangeable, secret-free.
+    resource public-key {
+        /// The registry name of the algorithm family this key is bound to,
+        /// e.g. `"X25519"` (the Web Cryptography API's
+        /// `KeyAlgorithm.name`).
+        algorithm-name: func() -> string;
+
+        /// The public key material, in the minting interface's documented
+        /// public format. Fallible with `error.other` even though this
+        /// resource has no extractability gate: a provider may hold the
+        /// key as a handle it can use but not read.
+        export-key-raw: async func() -> result<list<u8>, error>;
+
+        /// The public key as a JWK, e.g. an RFC 8037 OKP public key for
+        /// X25519. See `mac-key.export-key-jwk` for the package-wide JWK
+        /// contract; the same handle-not-bytes fallibility as `export-key-raw`
+        /// applies.
+        export-key-jwk: async func() -> result<string, error>;
+
+        /// The public key as an X.509 SubjectPublicKeyInfo (DER). The
+        /// same handle-not-bytes fallibility as `export-key-raw` applies.
+        export-key-spki: async func() -> result<list<u8>, error>;
+    }
+
+    /// A secret key. `agree` is one-shot on the immutable key; the
+    /// derivation state lives in the `derive-input` it returns.
+    resource secret-key {
+        /// The shared secret with `peer`, as a `derive-input` whose grants
+        /// are copied from this key's mint options (the Web Cryptography
+        /// API's model: derive usages live on the secret key).
+        ///
+        /// The returned input has a *natural* output length — the
+        /// agreement's full shared secret (32 bytes for X25519; the
+        /// curve's field size for ECDH) — so `derive-bits(none)` returns
+        /// the whole secret and `hkdf-sha2.prepare-from` accepts it as
+        /// IKM.
+        ///
+        /// Security:
+        /// - Fails `error.invalid-key` if the shared secret is the
+        ///   all-zero value (a small-order `peer`), checked in constant
+        ///   time — the W3C Web Cryptography API's mandatory contributory
+        ///   check, at the operation that computes the secret. Whether a
+        ///   degenerate peer can reach this check is the minting
+        ///   interface's import contract: X25519's deliberately
+        ///   permissive import admits one, and it surfaces here; ECDH's
+        ///   strict import rejects it at the mint.
+        /// - Fails `error.invalid-key` if `peer` is bound to a different
+        ///   algorithm than this key.
+        agree: async func(peer: borrow<public-key>) -> result<derive-input, error>;
+
+        /// See `public-key.algorithm-name`.
+        algorithm-name: func() -> string;
+
+        /// Whether inputs agreed by this key may yield raw bits. See
+        /// `agreement-key-options.can-derive-bits`.
+        can-derive-bits: func() -> bool;
+
+        /// Whether inputs agreed by this key may mint keys. See
+        /// `agreement-key-options.can-derive-key`.
+        can-derive-key: func() -> bool;
+
+        /// Whether the export functions may return this key's material.
+        /// See `agreement-key-options.extractable`.
+        extractable: func() -> bool;
+
+        /// The secret key as an RFC 8037 OKP private JWK. Fails
+        /// `error.not-extractable` unless the key was minted extractable;
+        /// fallible beyond the gate like every export (`README.md`,
+        /// "Extractability").
+        export-key-jwk: async func() -> result<string, error>;
+
+        /// The secret key as a PKCS#8 PrivateKeyInfo (DER), behind the
+        /// same extractability gate as `export-key-jwk`.
+        export-key-pkcs8: async func() -> result<list<u8>, error>;
+
+        /// The private-key JWK serialization as a `wrap-input`, for
+        /// wrapping under another key (see the `wrapping` interface).
+        /// Behind the same extractability gate as `export-key-jwk`, and
+        /// fallible beyond it like every export; the material itself
+        /// never reaches the caller.
+        to-wrap-input-jwk: async func() -> result<wrap-input, error>;
+
+        /// The PKCS#8 serialization as a `wrap-input`, behind the same
+        /// gate.
+        to-wrap-input-pkcs8: async func() -> result<wrap-input, error>;
+    }
+}

@@ -46,6 +46,12 @@ interface demo {
         /// asserts the server's echo. Exercises `send-datagram` /
         /// `recv-datagram` end to end.
         datagram: bool,
+        /// Construct the endpoint's identity from webcrypto key handles
+        /// minted in this component (exercising `identity-from-keys`)
+        /// instead of through `identity-generate`. Either way the demo
+        /// fails unless the endpoint reports the constructed identity's
+        /// public key as its `endpoint-id`.
+        inject-identity: bool,
         /// The application message the client sends (the server echoes it).
         message: string,
     }
@@ -79,6 +85,8 @@ interface demo {
 
 world iroh-demo {
     import polymorph:iroh/endpoint@0.1.0;
+    import polymorph:iroh/identity-generate@0.1.0;
+    import polymorph:iroh/identity-from-keys@0.1.0;
     import wasi:clocks/monotonic-clock@0.3.0;
     export demo;
 }
