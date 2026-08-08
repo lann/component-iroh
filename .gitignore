@@ -1,4 +1,4 @@
-/target
+target/
 /.deps
 node_modules
 /host-jco/generated
@@ -6,8 +6,6 @@ node_modules
 /host-jco/generated-endpoint
 /host-jco/generated-endpoint-demo
 /host-jco/build
-/experiments/udp-wake/guest/target
-/experiments/udp-wake/virt/target
 /experiments/udp-wake/composed.wasm
 /experiments/udp-wake/host/generated
 /experiments/udp-wake/host/generated-composed
