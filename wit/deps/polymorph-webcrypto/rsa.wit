@@ -1,0 +1,330 @@
+package polymorph:webcrypto@0.1.0;
+
+/// The RSA signature family's shared parameterization and admission
+/// contract. Interfaces minting RSA verification keys
+/// (`rsassa-pkcs1-v15-verify`, `rsa-pss-verify`) declare their variant
+/// from this one set (the `sha2`/`aes` pattern: one definition per
+/// family).
+///
+/// Key admission, shared by every RSA import:
+/// - The modulus length must be 1024–16384 bits inclusive; anything
+///   outside fails `error.invalid-key`. The small end of RSA is
+///   factorable — 768-bit was publicly factored in 2009 — and a
+///   signature that verifies under a factorable key authenticates
+///   nothing (see `README.md`, "Design notes").
+/// - The public exponent must be odd and at least 3, or the import
+///   fails `error.invalid-key`. `3` and `65537` are guaranteed to
+///   import; whether a larger exponent is admitted is
+///   implementation-defined — do not rely on either behavior.
+/// - The SubjectPublicKeyInfo algorithm must be `rsaEncryption`; a key
+///   carrying `id-RSASSA-PSS` parameters fails `error.invalid-key`.
+/// - RSA public keys have no raw form (the platform serves `spki` and
+///   `jwk` only), so `verifying-key.export-key-raw` fails
+///   `error.unsupported` for keys minted by this family.
+interface rsa {
+    /// The mint-bound digests RSA signature verification serves: RSA's
+    /// parameterization is the digest alone — the modulus length is a
+    /// property of the imported material, reported by
+    /// `verifying-key.algorithm-length`. (Each algorithm interface
+    /// names its closed set of parameterizations `<algorithm>-variant`;
+    /// the two RSA signature interfaces share this one.)
+    ///
+    /// SHA-1 is deliberately absent, though platforms serve it:
+    /// collision resistance is load-bearing for signature verification,
+    /// and SHA-1's is broken (see `README.md`, "Design notes").
+    enum rsa-variant {
+        sha256,
+        sha384,
+        sha512,
+    }
+
+    /// The modulus lengths `generate-key` serves: the standard sizes,
+    /// closed as an enum so a nonstandard or sub-2048 generation request
+    /// is unrepresentable. (Import admission is wider — see the family
+    /// contract above and the signing interfaces' window — because
+    /// existing keys are facts; new keys are choices.)
+    enum rsa-modulus {
+        /// 2048 bits: the NIST SP 800-131A floor, and the size the
+        /// deployed JOSE/DKIM/SAML ecosystems issue.
+        m2048,
+        /// 3072 bits (the 128-bit security match).
+        m3072,
+        /// 4096 bits.
+        m4096,
+        /// 8192 bits.
+        m8192,
+    }
+}
+
+/// RSASSA-PKCS1-v1_5 verification-key minting (RFC 8017 §8.2), as the
+/// Web Cryptography API serves it.
+///
+/// The variant binds the digest at mint — WebCrypto's own model for RSA
+/// (`RsaHashedImportParams`). Keys report `algorithm-name`
+/// `"RSASSA-PKCS1-v1_5"`, the variant's digest (`algorithm-hash`), and
+/// the modulus length (`algorithm-length`).
+///
+/// Security:
+/// - Verification is strict: the EMSA-PKCS1-v1_5 encoding is compared
+///   byte-exact, so a signature carrying BER laxities in its DigestInfo
+///   or mis-sized padding fails `error.authentication-failed`.
+interface rsassa-pkcs1-v15-verify {
+    use types.{error};
+    use signature.{verifying-key};
+    use rsa.{rsa-variant};
+
+    /// Import a public key as an X.509 SubjectPublicKeyInfo (DER).
+    /// Admission follows the family contract (see `rsa`).
+    import-verifying-key-spki: async func(%variant: rsa-variant, spki: list<u8>) -> result<verifying-key, error>;
+
+    /// Import a public key as an RSA public JWK (`kty: "RSA"`, with `n`
+    /// and `e`). `jwk` is the JWK as JSON text; see
+    /// `mac-key.export-key-jwk` for the package-wide JWK contract. An
+    /// `alg` member, when present, must be the variant's JOSE alg
+    /// (`"RS256"`, `"RS384"`, or `"RS512"`).
+    import-verifying-key-jwk: async func(%variant: rsa-variant, jwk: string) -> result<verifying-key, error>;
+}
+
+/// RSA-PSS verification-key minting (RFC 8017 §8.1), as the Web
+/// Cryptography API serves it.
+///
+/// The variant binds the digest at mint (WebCrypto's
+/// `RsaHashedImportParams`), and — unlike WebCrypto, whose `saltLength`
+/// is a per-operation parameter — the salt length binds at mint too: a
+/// granted key verifies exactly one PSS parameterization, so
+/// salt-length confusion is unrepresentable (see `README.md`, "Design
+/// notes"). The MGF1 digest is the message digest, as WebCrypto fixes
+/// it. Keys report `algorithm-name` `"RSA-PSS"`, the variant's digest,
+/// and the modulus length.
+interface rsa-pss-verify {
+    use types.{error};
+    use signature.{verifying-key};
+    use rsa.{rsa-variant};
+
+    /// Import a public key as an X.509 SubjectPublicKeyInfo (DER).
+    /// Admission follows the family contract (see `rsa`).
+    ///
+    /// `salt-length` is the PSS salt length in bytes the minted key
+    /// verifies with; a signature made under any other salt length
+    /// fails `error.authentication-failed`, like any other
+    /// non-verifying signature. (JOSE's `PS*` algorithms fix the salt
+    /// length to the digest length.)
+    import-verifying-key-spki: async func(%variant: rsa-variant, salt-length: u32, spki: list<u8>) -> result<verifying-key, error>;
+
+    /// Import a public key as an RSA public JWK (`kty: "RSA"`, with `n`
+    /// and `e`); see `import-verifying-key-spki` for `salt-length`, and
+    /// `mac-key.export-key-jwk` for the package-wide JWK contract. An
+    /// `alg` member, when present, must be the variant's JOSE alg
+    /// (`"PS256"`, `"PS384"`, or `"PS512"`).
+    import-verifying-key-jwk: async func(%variant: rsa-variant, salt-length: u32, jwk: string) -> result<verifying-key, error>;
+}
+
+/// RSASSA-PKCS1-v1_5 signing-key minting (RFC 8017 §8.2).
+///
+/// Gated `@unstable(feature = rsa-sign)`: serving RSA private-key
+/// operations is a per-deployment judgment — their timing behavior has a
+/// long exploitation lineage, and no implementation of them can be
+/// verified safe from inside this package — so consumers opt in by
+/// naming the gate (see `README.md`, "Stability gates").
+///
+/// Security:
+/// - RSA private-key operations leak key material through execution
+///   timing unless the implementation is constant-time end to end,
+///   including its big-integer arithmetic. Providers in
+///   attacker-observable timing domains do not export this interface,
+///   and compositions requiring it then fail at composition time (see
+///   `README.md`, "Timing-channel policy"). Host-backed providers serve
+///   it subject to the gate.
+///
+/// Signing-key admission tightens the family window: the modulus must
+/// be 2048–8192 bits, `error.invalid-key` outside. Below 2048 is NIST
+/// SP 800-131A's 2013 floor — a signing key below it mints signatures
+/// no current policy should trust (verification of legacy keys keeps
+/// the family's 1024-bit floor); above 8192 serves no deployed system. Keys import as PKCS#8 or an
+/// RSA private JWK — the platform pass-through formats — and never as
+/// bare components (see `README.md`, "Design notes", the
+/// format-admission rule). Imports return only the signing key (the
+/// no-derive rule; importers needing the public half supply it to the
+/// `-verify` interface).
+@unstable(feature = rsa-sign)
+interface rsassa-pkcs1-v15-sign {
+    @unstable(feature = rsa-sign)
+    use types.{error};
+    @unstable(feature = rsa-sign)
+    use signature.{signing-key, signing-key-options, verifying-key};
+    @unstable(feature = rsa-sign)
+    use rsa.{rsa-variant, rsa-modulus};
+    @unstable(feature = rsa-sign)
+    use wrapping.{unwrap-input};
+
+    /// Generate a fresh signing key pair, returning both halves — the
+    /// only point at which every provider is guaranteed to have the
+    /// public key on hand. The public exponent is 65537; it is not a
+    /// parameter.
+    @unstable(feature = rsa-sign)
+    generate-key: async func(%variant: rsa-variant, modulus: rsa-modulus, options: signing-key-options) -> result<tuple<signing-key, verifying-key>, error>;
+
+    /// Import a signing key as a PKCS#8 PrivateKeyInfo (DER, the RFC
+    /// 8017 RSAPrivateKey body, with its CRT parameters — the form every
+    /// platform emits). Admission follows the family contract plus the
+    /// signing window above.
+    @unstable(feature = rsa-sign)
+    import-signing-key-pkcs8: async func(%variant: rsa-variant, pkcs8: list<u8>, options: signing-key-options) -> result<signing-key, error>;
+
+    /// Import a signing key as an RSA private JWK (`kty: "RSA"`, with
+    /// `n`, `e`, `d`, and the CRT members `p`/`q`/`dp`/`dq`/`qi`, which
+    /// the platforms require of private RSA JWKs). `alg`, when present,
+    /// must be the variant's JOSE alg, as on the `-verify` interface.
+    @unstable(feature = rsa-sign)
+    import-signing-key-jwk: async func(%variant: rsa-variant, jwk: string, options: signing-key-options) -> result<signing-key, error>;
+
+    /// Mint a signing key from unwrapped key material read as a PKCS#8
+    /// PrivateKeyInfo, subject to `import-signing-key-pkcs8`'s contract.
+    /// `input` is consumed; the minted key's usages and extractability
+    /// come from `options` alone (the W3C Web Cryptography API's
+    /// `unwrapKey` model).
+    @unstable(feature = rsa-sign)
+    unwrap-signing-key-pkcs8: async func(%variant: rsa-variant, input: unwrap-input, options: signing-key-options) -> result<signing-key, error>;
+
+    /// Mint a signing key from unwrapped key material read as an RSA
+    /// private JWK, subject to `import-signing-key-jwk`'s contract plus
+    /// the unwrap-path `use`/`key_ops` checks (see `README.md`, "JWK
+    /// contract"). `input` is consumed.
+    @unstable(feature = rsa-sign)
+    unwrap-signing-key-jwk: async func(%variant: rsa-variant, input: unwrap-input, options: signing-key-options) -> result<signing-key, error>;
+}
+
+/// RSA-PSS signing-key minting (RFC 8017 §8.1).
+///
+/// Gated and admission-bounded exactly as `rsassa-pkcs1-v15-sign` (see
+/// its interface doc; the same security contract applies).
+///
+/// Keys minted here sign with the salt length equal to the digest
+/// length — the JOSE `PS*` and RFC 8017 default profile; it is not a
+/// parameter. (Verification of foreign signatures under other salt
+/// lengths is `rsa-pss-verify`'s parameterized mint.) The signature is
+/// not deterministic: PSS salts are random, so signing the same input
+/// twice produces different bytes, both of which verify.
+@unstable(feature = rsa-sign)
+interface rsa-pss-sign {
+    @unstable(feature = rsa-sign)
+    use types.{error};
+    @unstable(feature = rsa-sign)
+    use signature.{signing-key, signing-key-options, verifying-key};
+    @unstable(feature = rsa-sign)
+    use rsa.{rsa-variant, rsa-modulus};
+    @unstable(feature = rsa-sign)
+    use wrapping.{unwrap-input};
+
+    /// See `rsassa-pkcs1-v15-sign.generate-key`.
+    @unstable(feature = rsa-sign)
+    generate-key: async func(%variant: rsa-variant, modulus: rsa-modulus, options: signing-key-options) -> result<tuple<signing-key, verifying-key>, error>;
+
+    /// See `rsassa-pkcs1-v15-sign.import-signing-key-pkcs8`.
+    @unstable(feature = rsa-sign)
+    import-signing-key-pkcs8: async func(%variant: rsa-variant, pkcs8: list<u8>, options: signing-key-options) -> result<signing-key, error>;
+
+    /// See `rsassa-pkcs1-v15-sign.import-signing-key-jwk`.
+    @unstable(feature = rsa-sign)
+    import-signing-key-jwk: async func(%variant: rsa-variant, jwk: string, options: signing-key-options) -> result<signing-key, error>;
+
+    /// See `rsassa-pkcs1-v15-sign.unwrap-signing-key-pkcs8`.
+    @unstable(feature = rsa-sign)
+    unwrap-signing-key-pkcs8: async func(%variant: rsa-variant, input: unwrap-input, options: signing-key-options) -> result<signing-key, error>;
+
+    /// See `rsassa-pkcs1-v15-sign.unwrap-signing-key-jwk`.
+    @unstable(feature = rsa-sign)
+    unwrap-signing-key-jwk: async func(%variant: rsa-variant, input: unwrap-input, options: signing-key-options) -> result<signing-key, error>;
+}
+
+/// RSA-OAEP encryption-key minting (RFC 8017 §7.1), as the Web
+/// Cryptography API serves it: the public half of key transport.
+///
+/// The variant binds the digest at mint (WebCrypto's
+/// `RsaHashedImportParams`); the MGF1 digest is the same digest, as
+/// WebCrypto fixes it. Keys report `algorithm-name` `"RSA-OAEP"`, the
+/// variant's digest, and the modulus length.
+///
+/// Admission tightens the family window on both ends: the modulus must
+/// be 2048–8192 bits, `error.invalid-key` outside — encryption creates
+/// *future* artifacts, so unlike signature verification there is no
+/// legacy tier below 2048 (see `README.md`, "Design notes"). The
+/// plaintext bound follows from the mint: modulus bytes minus twice the
+/// digest length minus 2.
+interface rsa-oaep-encrypt {
+    use types.{error};
+    use public-encryption.{encryption-key};
+    use rsa.{rsa-variant};
+
+    /// Import a public key as an X.509 SubjectPublicKeyInfo (DER).
+    /// Admission follows the family contract (see `rsa`) plus the
+    /// window above.
+    import-encryption-key-spki: async func(%variant: rsa-variant, spki: list<u8>) -> result<encryption-key, error>;
+
+    /// Import a public key as an RSA public JWK (`kty: "RSA"`, with `n`
+    /// and `e`). An `alg` member, when present, must be the variant's
+    /// JOSE alg (`"RSA-OAEP-256"`, `"RSA-OAEP-384"`, or
+    /// `"RSA-OAEP-512"`). See `mac-key.export-key-jwk` for the
+    /// package-wide JWK contract.
+    import-encryption-key-jwk: async func(%variant: rsa-variant, jwk: string) -> result<encryption-key, error>;
+}
+
+/// RSA-OAEP decryption-key minting (RFC 8017 §7.1): the private half of
+/// key transport.
+///
+/// Gated `@unstable(feature = rsa-oaep-decrypt)`: RSA private-key
+/// operations are a per-deployment timing judgment the package cannot
+/// make or verify from inside — and decryption is the operation the
+/// attack lineage targets — so consumers opt in by naming the gate (see
+/// `README.md`, "Stability gates"; the same consent contract as
+/// `rsa-sign`).
+///
+/// Security:
+/// - Providers in attacker-observable timing domains do not export this
+///   interface, and compositions requiring it fail at composition time
+///   (see `README.md`, "Timing-channel policy"). Host-backed providers
+///   serve it subject to the gate.
+///
+/// Admission is `rsa-oaep-encrypt`'s (2048–8192 bits). Keys import as
+/// PKCS#8 or a full-CRT RSA private JWK, exactly as `rsassa-pkcs1-v15-sign`
+/// documents, and imports return only the decryption key (the no-derive
+/// rule).
+@unstable(feature = rsa-oaep-decrypt)
+interface rsa-oaep-decrypt {
+    @unstable(feature = rsa-oaep-decrypt)
+    use types.{error};
+    @unstable(feature = rsa-oaep-decrypt)
+    use public-encryption.{encryption-key, decryption-key, decryption-key-options};
+    @unstable(feature = rsa-oaep-decrypt)
+    use rsa.{rsa-variant, rsa-modulus};
+    @unstable(feature = rsa-oaep-decrypt)
+    use wrapping.{unwrap-input};
+
+    /// Generate a fresh key pair, returning both halves — the only
+    /// point at which every provider is guaranteed to have the public
+    /// key on hand. The public exponent is 65537; it is not a parameter.
+    @unstable(feature = rsa-oaep-decrypt)
+    generate-key: async func(%variant: rsa-variant, modulus: rsa-modulus, options: decryption-key-options) -> result<tuple<decryption-key, encryption-key>, error>;
+
+    /// Import a decryption key as a PKCS#8 PrivateKeyInfo (DER, with
+    /// CRT parameters).
+    @unstable(feature = rsa-oaep-decrypt)
+    import-decryption-key-pkcs8: async func(%variant: rsa-variant, pkcs8: list<u8>, options: decryption-key-options) -> result<decryption-key, error>;
+
+    /// Import a decryption key as a full-CRT RSA private JWK. `alg`,
+    /// when present, follows `import-encryption-key-jwk`'s values.
+    @unstable(feature = rsa-oaep-decrypt)
+    import-decryption-key-jwk: async func(%variant: rsa-variant, jwk: string, options: decryption-key-options) -> result<decryption-key, error>;
+
+    /// Mint a decryption key from unwrapped material read as a PKCS#8
+    /// PrivateKeyInfo. `input` is consumed; grants and extractability
+    /// come from `options` alone (the W3C `unwrapKey` model).
+    @unstable(feature = rsa-oaep-decrypt)
+    unwrap-decryption-key-pkcs8: async func(%variant: rsa-variant, input: unwrap-input, options: decryption-key-options) -> result<decryption-key, error>;
+
+    /// Mint a decryption key from unwrapped material read as an RSA
+    /// private JWK, subject to the unwrap-path `use`/`key_ops` checks
+    /// (see `README.md`, "JWK contract"). `input` is consumed.
+    @unstable(feature = rsa-oaep-decrypt)
+    unwrap-decryption-key-jwk: async func(%variant: rsa-variant, input: unwrap-input, options: decryption-key-options) -> result<decryption-key, error>;
+}

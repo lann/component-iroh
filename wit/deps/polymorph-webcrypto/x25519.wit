@@ -1,0 +1,85 @@
+package polymorph:webcrypto@0.1.0;
+
+/// X25519 key agreement (RFC 7748), as the Web Cryptography API serves it.
+///
+/// Keys returned here drive `key-agreement.secret-key.agree`, whose
+/// `derive-input` output feeds `derive-bits`, the key-minting interfaces'
+/// `derive-key`, and `hkdf-sha2.prepare-from` — the spec's own worked example
+/// (X25519 → HKDF → AES-GCM) runs entirely through handles.
+///
+/// Formats follow the format-admission rule (see `README.md`, "Design
+/// notes"): every format is one a platform-backed host passes to the
+/// platform verbatim. The public key travels as the raw 32-byte RFC 7748
+/// u-coordinate (the platform's public-only `raw` format); the secret key
+/// travels only as an RFC 8037 OKP private JWK (the platform's `jwk`
+/// format — its sole non-ASN.1 private form). Bare secret scalars have no
+/// platform door and are not a format here.
+interface x25519 {
+    use types.{error};
+    use key-agreement.{public-key, secret-key, agreement-key-options};
+    use wrapping.{unwrap-input};
+
+    /// Import a raw 32-byte RFC 7748 u-coordinate as a public key.
+    ///
+    /// Import is deliberately permissive, as the platform's is: any
+    /// 32-byte string is accepted (the high bit is masked at use, per RFC
+    /// 7748), and degenerate keys — small-order points, non-canonical
+    /// encodings, points on the twist — are not rejected here. A
+    /// small-order key surfaces at `agree` as `error.invalid-key` (the
+    /// all-zero check); material of any other length fails
+    /// `error.invalid-key` at import.
+    import-public-key-raw: async func(raw: list<u8>) -> result<public-key, error>;
+
+    /// Import a public key as an X.509 SubjectPublicKeyInfo (DER, RFC
+    /// 8410 algorithm id 1.3.101.110). The embedded u-coordinate is
+    /// admitted exactly as `import-public-key-raw` admits it.
+    import-public-key-spki: async func(spki: list<u8>) -> result<public-key, error>;
+
+    /// Import a public key as an RFC 8037 OKP public JWK (`kty: "OKP"`,
+    /// `crv: "X25519"`, `x`). `jwk` is the JWK as JSON text; see
+    /// `mac-key.export-key-jwk` for the package-wide JWK contract.
+    import-public-key-jwk: async func(jwk: string) -> result<public-key, error>;
+
+    /// Import a static secret key as an RFC 8037 OKP private JWK
+    /// (`kty: "OKP"`, `crv: "X25519"`, with `x` and `d` both required —
+    /// RFC 8037 makes the public coordinate mandatory, so this is
+    /// inherently the public+private form).
+    ///
+    /// `jwk` is the JWK as JSON text; the implementation owns the parse
+    /// (see `mac-key.export-key-jwk` for the package-wide JWK contract,
+    /// including `ext` validation against the options' extractability).
+    /// `d` is the 32-byte scalar, clamped at use per RFC 7748.
+    ///
+    /// Security:
+    /// - Implementations MAY reject a JWK whose `x` is not the public key
+    ///   of `d` with `error.invalid-key`, and MUST NOT trust `x` for any
+    ///   operation: the imported key's identity is `d`'s. (The W3C Web
+    ///   Cryptography API's import steps do not mandate the consistency
+    ///   check, and engines differ, so a platform-backed host cannot
+    ///   promise it.)
+    import-secret-key-jwk: async func(jwk: string, options: agreement-key-options) -> result<secret-key, error>;
+
+    /// Import a static secret key as a PKCS#8 PrivateKeyInfo (DER, RFC
+    /// 8410: the 32-byte scalar in a CurvePrivateKey). The scalar is
+    /// clamped at use per RFC 7748, like the JWK import's `d`.
+    import-secret-key-pkcs8: async func(pkcs8: list<u8>, options: agreement-key-options) -> result<secret-key, error>;
+
+    /// Generate a fresh X25519 key pair.
+    generate-key: async func(options: agreement-key-options) -> result<tuple<secret-key, public-key>, error>;
+
+    /// Mint a static secret key from unwrapped key material (see the
+    /// `wrapping` interface): `input`'s bytes are read as an OKP private
+    /// JWK, subject to `import-secret-key-jwk`'s contract plus the
+    /// unwrap-path `use`/`key_ops` checks (see `README.md`, "JWK
+    /// contract"). `input` is consumed.
+    ///
+    /// The minted key's grants and extractability come from `options`
+    /// alone (the W3C Web Cryptography API's `unwrapKey` model).
+    unwrap-secret-key-jwk: async func(input: unwrap-input, options: agreement-key-options) -> result<secret-key, error>;
+
+    /// Mint a static secret key from unwrapped key material read as a
+    /// PKCS#8 PrivateKeyInfo, subject to `import-secret-key-pkcs8`'s
+    /// contract. `input` is consumed; see `unwrap-secret-key-jwk` for
+    /// the options model.
+    unwrap-secret-key-pkcs8: async func(input: unwrap-input, options: agreement-key-options) -> result<secret-key, error>;
+}

@@ -1045,7 +1045,14 @@ impl GuestEndpoint for EndpointRes {
             ));
         }
 
-        let identity = Identity::generate().await.map_err(other)?;
+        let identity = match options.identity {
+            Some(injected) => {
+                Identity::from_injected(injected.signing_key.into(), injected.verifying_key.into())
+                    .await
+                    .map_err(Error::InvalidArgument)?
+            }
+            None => Identity::generate().await.map_err(other)?,
+        };
         let relay = RelayConn::connect(&relay_url, &identity)
             .await
             .map_err(Error::ConnectFailed)?;

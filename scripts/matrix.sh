@@ -146,6 +146,18 @@ run_pair "endpoint-relay-wasmtime-wasmtime" \
     timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
         --message "matrix endpoint" --peer
 
+# Embedder-injected identity: both sides mint an Ed25519 pair inside
+# the demo component through polymorph:webcrypto and hand it to bind.
+# The demo fails unless the endpoint reports the injected public key
+# as its endpoint-id, so a passing echo asserts bind adopted the
+# supplied pair on both roles (the client additionally authenticated
+# the server's injected identity end to end).
+run_pair "endpoint-identity-wasmtime-wasmtime" \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role server --relay "$RELAY_URL" \
+        --inject-identity -- \
+    timeout 120 "$EHOST" "$COMPOSED_WASM" --role client --relay "$RELAY_URL" \
+        --inject-identity --message "matrix identity" --peer
+
 # The UDP direct path: the server binds a real socket (port 0 =
 # ephemeral) and the client dials the scraped address. The client
 # must bind its own socket too — without one, connect() ignores ip

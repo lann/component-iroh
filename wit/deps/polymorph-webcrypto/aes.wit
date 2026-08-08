@@ -1,0 +1,282 @@
+package polymorph:webcrypto@0.1.0;
+
+/// The AES family's shared parameterization. Interfaces minting AES-based
+/// keys (`aes-gcm`, `aes-cbc`, …) declare their variant from
+/// this one closed set (the `sha2` pattern: one definition per family).
+interface aes {
+    /// The AES variants, distinguished by key size: AES closes this set, so
+    /// it is an enum, not a number. (Each algorithm interface names its
+    /// closed set of parameterizations `<algorithm>-variant`.)
+    enum aes-variant {
+        aes128,
+        /// Declined by every implementation of this package: every
+        /// minting path fails `error.unsupported`. The decline is a
+        /// portability ruling, not a gap — uniform service is impossible
+        /// (a major browser engine omits AES-192 from WebCrypto
+        /// deliberately and permanently) and the variant earns no
+        /// exception; see `README.md`, "Design notes". Declared because
+        /// AES closes the set.
+        aes192,
+        aes256,
+    }
+}
+
+/// AES-GCM key minting (NIST SP 800-38D).
+///
+/// Keys minted here drive `aead.aead-key.seal`/`open` with the parameters
+/// as the Web Cryptography API's `AesGcmParams` defines them, per call.
+///
+/// Security:
+/// - The caller owns nonce uniqueness. Nonce reuse under one key defeats
+///   the algorithm's confidentiality and authenticity guarantees; use a
+///   deterministic per-key uniqueness scheme (SP 800-38D §8), or draw
+///   96-bit nonces at random only within §8.2.2's invocation bounds.
+/// - Short tags weaken the forgery bound (SP 800-38D Appendix C) and are
+///   opt-in only, behind an explicit `tag-size`.
+/// - 96 bits (12 bytes) is the standard nonce size (the `nonce-size`
+///   getter) and the fast path. Other lengths cost an extra GHASH pass
+///   (SP 800-38D §7.1) and forfeit §8.2's deterministic-construction
+///   guidance.
+///
+/// Parameter acceptance:
+///
+/// - **Nonce**: 12 to 128 bytes inclusive; a length outside that window
+///   fails `error.invalid-nonce` on every implementation (see
+///   `README.md`, "Portability contract"). The window is the range every
+///   implementation serves identically. Nonces shorter than the 96-bit
+///   standard size are cryptographically discouraged (SP 800-38D
+///   recommends the 96-bit construction), and lengths beyond 128 bytes
+///   serve no protocol in use.
+/// - **Tag size**: 16 bytes by default (`tag-size` of `none`); the
+///   algorithm's set is 4, 8, 12, 13, 14, 15, or 16 bytes (the registry's
+///   32–128-bit set). Implementations MAY decline sizes their security
+///   policy does not serve with `error.unsupported`.
+/// - **Bounds**: GCM defines a maximum plaintext of 2^39 − 256 bits
+///   (~64 GiB) per invocation and an AAD bound of 2^64 − 1 bits.
+///   Implementations reaching them fail rather than wrap, but their
+///   buffering limits (`error.other`) are reached far earlier in practice.
+interface aes-gcm {
+    use types.{error};
+    use aead.{aead-key, aead-key-options};
+    use aes.{aes-variant};
+    use derivation.{derive-input};
+    use wrapping.{unwrap-input};
+
+    /// Import raw key material as the declared AES variant.
+    ///
+    /// `variant` is deliberately redundant with `raw`'s length: material of
+    /// any other length fails with `error.invalid-key`, so malformed
+    /// material (for example, key bytes accidentally left hex-encoded)
+    /// cannot silently mint a key of an unintended size. An implementation
+    /// not serving the variant (AES-192 is declined everywhere — see the
+    /// `aes-variant` doc) fails with `error.unsupported`.
+    import-key-raw: async func(%variant: aes-variant, raw: list<u8>, options: aead-key-options) -> result<aead-key, error>;
+
+    /// Import an RFC 7517 JSON Web Key as an AES-GCM key of the declared
+    /// variant.
+    ///
+    /// `jwk` is the JWK as JSON text; the implementation owns the parse
+    /// (see `README.md`, "JWK contract"). The key must be an `oct` key
+    /// whose `alg`, if present, names the declared variant
+    /// (`"A128GCM"`/`"A192GCM"`/`"A256GCM"`); the decoded material is then
+    /// subject to `import-key-raw`'s contract.
+    import-key-jwk: async func(%variant: aes-variant, jwk: string, options: aead-key-options) -> result<aead-key, error>;
+
+    /// Generate a fresh random key of the given AES variant. Fails with
+    /// `error.unsupported` if this implementation does not serve the
+    /// variant.
+    generate-key: async func(%variant: aes-variant, options: aead-key-options) -> result<aead-key, error>;
+
+    /// Mint a key from a parameterized derivation: the derivation runs
+    /// at the variant's key length (WebCrypto's `deriveKey` chain — get
+    /// key length, derive bits, import) and the result is subject to
+    /// `import-key-raw`'s contract.
+    ///
+    /// Requires `can-derive-key` on the input, else `error.not-permitted`.
+    /// Requesting an *extractable* key requires `can-derive-bits` too: an
+    /// exportable key is bits disclosure by other means.
+    derive-key: async func(%variant: aes-variant, input: borrow<derive-input>, options: aead-key-options) -> result<aead-key, error>;
+
+    /// Mint a key from unwrapped key material (see the `wrapping`
+    /// interface): `input`'s bytes are read as raw key material, subject
+    /// to `import-key-raw`'s contract. `input` is consumed.
+    ///
+    /// The minted key's usages and extractability come from `options`
+    /// alone (the W3C Web Cryptography API's `unwrapKey` model).
+    unwrap-key-raw: async func(%variant: aes-variant, input: unwrap-input, options: aead-key-options) -> result<aead-key, error>;
+
+    /// Mint a key from unwrapped key material read as an RFC 7517 JSON
+    /// Web Key, subject to `import-key-jwk`'s contract plus the
+    /// unwrap-path `use`/`key_ops` checks (see `README.md`, "JWK
+    /// contract"). `input` is consumed; see `unwrap-key-raw` for the
+    /// options model.
+    unwrap-key-jwk: async func(%variant: aes-variant, input: unwrap-input, options: aead-key-options) -> result<aead-key, error>;
+}
+
+/// AES-CBC key minting (NIST SP 800-38A; PKCS#7 padding, the Web
+/// Cryptography API's `AES-CBC`): `cipher.cipher-key`s for the
+/// unauthenticated mode, served for compatibility with CBC-committed
+/// formats. Read the `cipher` interface's Security notes first.
+///
+/// Ciphertext is the padded encryption of the plaintext: always a
+/// non-zero multiple of 16 bytes (a full padding block is added when the
+/// plaintext is already block-aligned).
+///
+/// Security:
+/// - The 16-byte IV must be *unpredictable* to an attacker who can
+///   influence future plaintexts (CWE-329; the BEAST class), not merely
+///   unique: generate it fresh and randomly per message.
+/// - CBC with visible decryption failures is padding-oracle-prone by
+///   nature. The `cipher` kind's uniform-failure rule bounds what this
+///   API reveals to the verdict itself; protocols that surface the
+///   verdict per message to an active attacker remain at risk. Prefer
+///   `aes-gcm` anywhere the format is not already fixed.
+interface aes-cbc {
+    use types.{error};
+    use cipher.{cipher-key, cipher-key-options};
+    use aes.{aes-variant};
+    use derivation.{derive-input};
+    use wrapping.{unwrap-input};
+
+    /// Import raw key material as the declared AES variant (see
+    /// `aes-gcm.import-key-raw` for the variant-redundancy contract).
+    import-key-raw: async func(%variant: aes-variant, raw: list<u8>, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Import an RFC 7517 JSON Web Key as an AES-CBC key of the declared
+    /// variant. The key must be an `oct` key whose `alg`, if present,
+    /// names the declared variant (`"A128CBC"`/`"A192CBC"`/`"A256CBC"`);
+    /// otherwise as `aes-gcm.import-key-jwk`.
+    import-key-jwk: async func(%variant: aes-variant, jwk: string, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Generate a fresh random key of the given AES variant. Fails with
+    /// `error.unsupported` if this implementation does not serve the
+    /// variant.
+    generate-key: async func(%variant: aes-variant, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Mint a key from a parameterized derivation (the
+    /// `aes-gcm.derive-key` contract, minting a `cipher-key`).
+    derive-key: async func(%variant: aes-variant, input: borrow<derive-input>, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Mint a key from unwrapped key material read as raw bytes, subject
+    /// to `import-key-raw`'s contract. `input` is consumed; see
+    /// `aes-gcm.unwrap-key-raw` for the options model.
+    unwrap-key-raw: async func(%variant: aes-variant, input: unwrap-input, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Mint a key from unwrapped key material read as an `oct` JWK,
+    /// subject to `import-key-jwk`'s contract. `input` is consumed.
+    unwrap-key-jwk: async func(%variant: aes-variant, input: unwrap-input, options: cipher-key-options) -> result<cipher-key, error>;
+}
+
+/// AES-CTR key minting (NIST SP 800-38A counter mode, the Web
+/// Cryptography API's `AES-CTR`): `cipher.cipher-key`s for the
+/// unauthenticated mode, served for compatibility with CTR-committed
+/// formats. Read the `cipher` interface's Security notes first.
+///
+/// Ciphertext is exactly the plaintext's length. The per-call `iv` is the
+/// 16-byte *initial counter block*, and `counter-length` (required; 1 to
+/// 128) is the width in bits of its rightmost, incrementing portion —
+/// WebCrypto's `AesCtrParams`. The counter wraps around within that width
+/// without carrying into the fixed portion; a message longer than
+/// 2^`counter-length` blocks fails rather than reuse counter values.
+///
+/// Security:
+/// - Every counter block a key ever consumes must be unique: a repeated
+///   block is a two-time pad and forfeits confidentiality outright.
+///   Uniqueness spans messages — the caller partitions the counter space
+///   across messages via the fixed portion, per SP 800-38A Appendix B.
+interface aes-ctr {
+    use types.{error};
+    use cipher.{cipher-key, cipher-key-options};
+    use aes.{aes-variant};
+    use derivation.{derive-input};
+    use wrapping.{unwrap-input};
+
+    /// Import raw key material as the declared AES variant (see
+    /// `aes-gcm.import-key-raw` for the variant-redundancy contract).
+    import-key-raw: async func(%variant: aes-variant, raw: list<u8>, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Import an RFC 7517 JSON Web Key as an AES-CTR key of the declared
+    /// variant. The key must be an `oct` key whose `alg`, if present,
+    /// names the declared variant (`"A128CTR"`/`"A192CTR"`/`"A256CTR"`);
+    /// otherwise as `aes-gcm.import-key-jwk`.
+    import-key-jwk: async func(%variant: aes-variant, jwk: string, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Generate a fresh random key of the given AES variant. Fails with
+    /// `error.unsupported` if this implementation does not serve the
+    /// variant.
+    generate-key: async func(%variant: aes-variant, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Mint a key from a parameterized derivation (the
+    /// `aes-gcm.derive-key` contract, minting a `cipher-key`).
+    derive-key: async func(%variant: aes-variant, input: borrow<derive-input>, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Mint a key from unwrapped key material read as raw bytes, subject
+    /// to `import-key-raw`'s contract. `input` is consumed; see
+    /// `aes-gcm.unwrap-key-raw` for the options model.
+    unwrap-key-raw: async func(%variant: aes-variant, input: unwrap-input, options: cipher-key-options) -> result<cipher-key, error>;
+
+    /// Mint a key from unwrapped key material read as an `oct` JWK,
+    /// subject to `import-key-jwk`'s contract. `input` is consumed.
+    unwrap-key-jwk: async func(%variant: aes-variant, input: unwrap-input, options: cipher-key-options) -> result<cipher-key, error>;
+}
+
+/// AES-KW key minting (RFC 3394; NIST SP 800-38F's KW): `key-wrap.kw-key`s
+/// for the deterministic key-wrapping mode, the Web Cryptography API's
+/// `AES-KW`. Read the `key-wrap` interface's Security notes first.
+///
+/// Keys minted here drive `kw-key.wrap`/`unwrap`. The wrapped form is RFC
+/// 3394's: the input's length plus 8 bytes, carrying the 64-bit ICV whose
+/// failure `unwrap` reports as `error.authentication-failed`.
+///
+/// Input domains:
+/// - `kw-key.wrap`: the serialized input must be a multiple of 8 bytes,
+///   at least 16 (RFC 3394 §2; every AES and multiple-of-8 HMAC
+///   raw key qualifies). Anything else fails `error.invalid-key`.
+/// - JWK-formatted wrap input (a `to-wrap-input-jwk` serialization) is
+///   first padded with ASCII spaces (0x20) to a multiple of 8 — the
+///   behavior Web Cryptography API engines interoperate on. The JWK
+///   contract's trailing-space tolerance carries the round trip (see
+///   `README.md`, "JWK contract"). No other format is padded.
+/// - `kw-key.unwrap`: a wrapped input is a multiple of 8 bytes, at
+///   least 24 (the wrapped form of the smallest wrap input). Input
+///   outside that domain cannot carry the wire format and fails
+///   `error.authentication-failed`, indistinguishable from an ICV
+///   failure.
+///
+/// A FIPS 140-3 approved-mode provider may serve this interface: KW is an
+/// SP 800-38F approved mode and draws no IV.
+interface aes-kw {
+    use types.{error};
+    use key-wrap.{kw-key, kw-key-options};
+    use aes.{aes-variant};
+    use derivation.{derive-input};
+    use wrapping.{unwrap-input};
+
+    /// Import raw key material as the declared AES variant (see
+    /// `aes-gcm.import-key-raw` for the variant-redundancy contract).
+    import-key-raw: async func(%variant: aes-variant, raw: list<u8>, options: kw-key-options) -> result<kw-key, error>;
+
+    /// Import an RFC 7517 JSON Web Key as an AES-KW key of the declared
+    /// variant. The key must be an `oct` key whose `alg`, if present,
+    /// names the declared variant (`"A128KW"`/`"A192KW"`/`"A256KW"`);
+    /// otherwise as `aes-gcm.import-key-jwk`.
+    import-key-jwk: async func(%variant: aes-variant, jwk: string, options: kw-key-options) -> result<kw-key, error>;
+
+    /// Generate a fresh random key of the given AES variant. Fails with
+    /// `error.unsupported` if this implementation does not serve the
+    /// variant.
+    generate-key: async func(%variant: aes-variant, options: kw-key-options) -> result<kw-key, error>;
+
+    /// Mint a key from a parameterized derivation (the
+    /// `aes-gcm.derive-key` contract, minting a `kw-key`).
+    derive-key: async func(%variant: aes-variant, input: borrow<derive-input>, options: kw-key-options) -> result<kw-key, error>;
+
+    /// Mint a key from unwrapped key material read as raw bytes, subject
+    /// to `import-key-raw`'s contract. `input` is consumed; see
+    /// `aes-gcm.unwrap-key-raw` for the options model.
+    unwrap-key-raw: async func(%variant: aes-variant, input: unwrap-input, options: kw-key-options) -> result<kw-key, error>;
+
+    /// Mint a key from unwrapped key material read as an `oct` JWK,
+    /// subject to `import-key-jwk`'s contract. `input` is consumed.
+    unwrap-key-jwk: async func(%variant: aes-variant, input: unwrap-input, options: kw-key-options) -> result<kw-key, error>;
+}

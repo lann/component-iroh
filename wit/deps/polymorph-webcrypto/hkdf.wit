@@ -1,0 +1,106 @@
+package polymorph:webcrypto@0.1.0;
+
+/// HKDF (RFC 5869) input keying material: the hash-independent half of
+/// the HKDF surface. The `ikm` resource minted here parameterizes
+/// derivations through the per-hash prepare interfaces (`hkdf-sha2`,
+/// `hkdf-sha1`), so one imported secret serves either hash family.
+///
+/// Security:
+/// - No operation returns an `ikm`'s bytes, under any grant: WebCrypto's
+///   forced non-extractability on HKDF base keys, made structural.
+/// - The implementation holds imported IKM in memory for the resource's
+///   construction-to-drop lifetime; that window is the secret's exposure
+///   to memory side channels. Import late, drop early. Dropping releases
+///   (and, in scrubbing implementations, zeroizes) it.
+interface hkdf {
+    use types.{error};
+    use derivation.{derive-options};
+    use wrapping.{unwrap-input};
+
+    /// Input keying material: consumable only by `prepare`, never
+    /// readable. Usage grants are fixed at import and copied to every
+    /// input prepared from it.
+    resource ikm {
+        /// Whether inputs prepared from this material may yield raw bits.
+        can-derive-bits: func() -> bool;
+        /// Whether inputs prepared from this material may mint keys.
+        can-derive-key: func() -> bool;
+    }
+
+    /// Import input keying material. Empty material is accepted (RFC
+    /// 5869 permits it, and the Web Cryptography API serves it), but an
+    /// implementation enforcing a security policy MAY reject degenerate
+    /// material with `error.invalid-key`, as on
+    /// `hmac-sha2.import-key-raw`. Fails `error.not-permitted` if
+    /// `options` grants nothing, per the package-wide options contract.
+    import-ikm: async func(raw: list<u8>, options: derive-options) -> result<ikm, error>;
+
+    /// Mint input keying material from unwrapped bytes (see the
+    /// `wrapping` interface), subject to `import-ikm`'s contract: a KDF
+    /// secret can arrive under a wrapping key and parameterize
+    /// derivations without its bytes ever being observable. Like
+    /// `import-ikm`, this is not a format choice — the bytes are the
+    /// material. `input` is consumed.
+    ///
+    /// The grants come from `options` alone (the W3C Web Cryptography
+    /// API's `unwrapKey` model; its forced non-extractability on HKDF
+    /// base keys is structural here, as on `import-ikm`).
+    unwrap-ikm: async func(input: unwrap-input, options: derive-options) -> result<ikm, error>;
+}
+
+/// HKDF (RFC 5869) over the SHA-2 hash family: the extract-then-expand
+/// key derivation function, as the Web Cryptography API serves it.
+///
+/// This interface mints no keys. It mints `derive-input`s — parameterized
+/// derivations — which the key-minting interfaces' `derive-key` functions
+/// consume (`aes-gcm.derive-key`, `hmac-sha2.derive-key`), and which
+/// yield raw output through `derivation.derive-input.derive-bits`. The
+/// `ikm` resource and its import stay `hkdf`'s, so one imported secret
+/// can parameterize derivations of either hash family.
+interface hkdf-sha2 {
+    use types.{error};
+    use sha2.{sha2-variant};
+    use hkdf.{ikm};
+    use derivation.{derive-input};
+
+    /// Parameterize a derivation: HKDF-Extract with `salt` runs over the
+    /// material (eagerly, so the returned input retains the PRK rather
+    /// than the IKM), and `info` is bound for the expand step at use.
+    /// An implementation not serving the variant fails
+    /// `error.unsupported` (the truncated SHA-2 variants are unserved
+    /// package-wide, as for `hmac-sha2`).
+    prepare: async func(%variant: sha2-variant, input: borrow<ikm>, salt: list<u8>, info: list<u8>) -> result<derive-input, error>;
+
+    /// Parameterize a derivation whose IKM is another derivation's output
+    /// — the chaining step (a future agreement's shared secret fed to
+    /// HKDF without transiting the caller).
+    ///
+    /// The upstream derivation runs at its natural output length, which
+    /// requires it to have one: chaining from another KDF's input fails
+    /// `error.other`, exactly as the platform's `deriveKey(… → "HKDF")`
+    /// does (`get key length` for a KDF target is null, and a KDF's
+    /// derive-bits rejects null). Requires `can-derive-key` on the
+    /// upstream input, whose grants the new input copies.
+    prepare-from: async func(%variant: sha2-variant, input: borrow<derive-input>, salt: list<u8>, info: list<u8>) -> result<derive-input, error>;
+}
+
+/// HKDF (RFC 5869) over SHA-1, for interoperability with SHA-1-committed
+/// derivations. The construction is HMAC-based, so SHA-1's collision
+/// breaks do not reach it (see `hmac-sha1`'s Security notes); prefer the
+/// SHA-2 parameterizations in new designs.
+///
+/// This interface adds only the SHA-1 `prepare` steps, parallel to
+/// `hkdf-sha2`'s: the `ikm` resource and its import stay `hkdf`'s, so one
+/// imported secret can parameterize derivations of either hash family.
+interface hkdf-sha1 {
+    use types.{error};
+    use hkdf.{ikm};
+    use derivation.{derive-input};
+
+    /// Parameterize an HKDF-SHA-1 derivation. See `hkdf-sha2.prepare`.
+    prepare: async func(input: borrow<ikm>, salt: list<u8>, info: list<u8>) -> result<derive-input, error>;
+
+    /// Parameterize an HKDF-SHA-1 derivation from another derivation's
+    /// output. See `hkdf-sha2.prepare-from`.
+    prepare-from: async func(input: borrow<derive-input>, salt: list<u8>, info: list<u8>) -> result<derive-input, error>;
+}

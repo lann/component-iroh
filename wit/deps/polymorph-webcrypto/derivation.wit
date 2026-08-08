@@ -1,0 +1,87 @@
+package polymorph:webcrypto@0.1.0;
+
+/// The `derivation` primitive kind: turning secrets that are not yet keys —
+/// an agreement's shared secret, imported input keying material (IKM), a
+/// password — into bits or typed keys, without the secret transiting the
+/// caller.
+///
+/// Every WebCrypto `deriveBits`/`deriveKey` call operates on a pair the
+/// spec never names: the base key plus the normalized algorithm parameters
+/// (IKM + salt/info; password + salt/iterations; private key + peer
+/// public). `derive-input` is that pair as a resource — a fully
+/// parameterized derivation, lacking only the output length, which the
+/// platform too supplies per use.
+///
+/// Sources construct it on their own interfaces (`hkdf-sha2.prepare`,
+/// `pbkdf2-sha2.prepare`, an agreement's `agree`); targets consume it
+/// beside `import-key-raw` on their minting interfaces (`aes-gcm.derive-key`,
+/// `hmac-sha2.derive-key`).
+///
+/// Security:
+/// - Raw secret bytes enter only on the KDF interfaces, so nothing
+///   reaching a `derive-key` has skipped agreement-or-KDF, and no
+///   operation anywhere returns a base secret's bytes. WebCrypto's forced
+///   non-extractability on KDF base keys is a structural property here
+///   rather than a checked one.
+interface derivation {
+    use types.{error};
+
+    /// Mint-time policy for derivation base secrets, following the
+    /// package-wide options contract (see `README.md`): the constructor
+    /// grants nothing, at least one grant is required to mint, and the
+    /// vocabulary is WebCrypto's usage pair for derive-capable keys.
+    resource derive-options {
+        constructor();
+        /// Whether inputs built on this base secret may yield raw bits
+        /// through `derive-input.derive-bits`, and — because an extractable
+        /// key is bits disclosure by other means — whether they may mint
+        /// *extractable* keys. Disabled by default.
+        can-derive-bits: func(allowed: bool);
+        /// Whether inputs built on this base secret may mint keys through
+        /// the target interfaces' `derive-key`. Disabled by default.
+        can-derive-key: func(allowed: bool);
+    }
+
+    /// A fully parameterized derivation. The output may already be
+    /// computed, or the computation may still be pending.
+    ///
+    /// Grants are copied from the base secret (or upstream input) at
+    /// construction; parameterization neither grants nor revokes.
+    ///
+    /// Security:
+    /// - An implementation may run the derivation as soon as the input is
+    ///   constructed, or wait until the input is used. While the
+    ///   computation is pending, the input holds its own copy of the base
+    ///   secret, so a secret stays in memory as long as any resource
+    ///   derived from it. Implementations SHOULD NOT keep a base secret in
+    ///   memory longer than the resources that denote it, and SHOULD
+    ///   compute early where that shortens the window (for HKDF, the
+    ///   extract step at `prepare` retains only the PRK and drops the IKM
+    ///   copy).
+    resource derive-input {
+        /// Whether `derive-bits` (and minting extractable keys) is
+        /// permitted. See `derive-options.can-derive-bits`.
+        can-derive-bits: func() -> bool;
+
+        /// Whether the target interfaces' `derive-key` is permitted. See
+        /// `derive-options.can-derive-key`.
+        can-derive-key: func() -> bool;
+
+        /// The derived bits.
+        ///
+        /// `length` is in bits, WebCrypto's denomination for this
+        /// parameter, and must be a multiple of 8 — none of this package's
+        /// implementations serve sub-byte outputs (the platform zero-pads
+        /// them; a consumer wanting truncation truncates). `none` means
+        /// the source's natural output length; sources without one — every
+        /// KDF, whose output length is a caller choice — fail
+        /// `error.other`, which is the platform's own null-length
+        /// behavior for them (HKDF and PBKDF2 throw `OperationError`
+        /// where the agreements return the whole secret).
+        ///
+        /// Fails `error.not-permitted` without the `can-derive-bits`
+        /// grant. Fallible even when granted: a platform-resident source
+        /// may be usable but unreadable.
+        derive-bits: async func(length: option<u32>) -> result<list<u8>, error>;
+    }
+}

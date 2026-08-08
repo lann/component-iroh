@@ -112,6 +112,26 @@ interface types {
 /// their streams.
 interface endpoint {
     use types.{endpoint-id, endpoint-addr, connection-state, path-kind, error};
+    use polymorph:webcrypto/signature@0.1.0.{signing-key, verifying-key};
+
+    /// An endpoint identity supplied to `bind`: an Ed25519 key pair as
+    /// `polymorph:webcrypto` handles. The private key stays behind its
+    /// handle; this component never reads it.
+    ///
+    /// Both keys must be Ed25519, `signing-key` must permit `sign`, and
+    /// `verifying-key` must be the signing key's public half. `bind`
+    /// checks the pair — including a sign/verify probe of the halves
+    /// against each other — and fails `error.invalid-argument` on any
+    /// mismatch, so a bad pair fails at bind, not as handshake failures
+    /// against every peer. Extractability is not required.
+    record identity {
+        /// Signs for the identity (the TLS handshake and relay
+        /// authentication).
+        signing-key: signing-key,
+        /// The public half. Its raw 32-byte encoding is the
+        /// `endpoint-id`.
+        verifying-key: verifying-key,
+    }
 
     /// Configuration for `endpoint.bind`.
     record endpoint-options {
@@ -131,19 +151,28 @@ interface endpoint {
         /// on its relay connections. When false, `webrtc` entries are
         /// ignored for dialing and inbound signaling is discarded.
         webrtc: bool,
+        /// The identity to bind as. `none` mints a fresh identity
+        /// through the endpoint's crypto import (see `bind`).
+        identity: option<identity>,
     }
 
     /// A bound endpoint: an identity plus the machinery to connect and
     /// accept.
     resource endpoint {
-        /// Mint a fresh identity and stand the endpoint up.
+        /// Stand the endpoint up.
         ///
-        /// The identity's private key is created through the endpoint's
-        /// crypto import and is never present in this component's
-        /// memory. The identity's lifetime is this resource's: binding
-        /// again mints a new one. (Persistent identities are a planned
-        /// direction of the crypto provider's key storage, not a
-        /// surface change here.)
+        /// With `endpoint-options.identity` absent, a fresh identity is
+        /// minted through the endpoint's crypto import; its lifetime is
+        /// this resource's, and binding again mints a new one. With an
+        /// identity supplied, the endpoint binds as that identity: the
+        /// embedder owns provisioning and persistence (for example, a
+        /// platform-held key that survives instantiations). Either way
+        /// the private key lives behind a `polymorph:webcrypto` handle
+        /// and is never present in this component's memory.
+        ///
+        /// A supplied identity that is not Ed25519, cannot sign, or
+        /// whose halves do not match fails `error.invalid-argument`
+        /// (see `identity`).
         bind: static async func(options: endpoint-options) -> result<endpoint, error>;
 
         /// This endpoint's identity.
@@ -275,11 +304,14 @@ interface endpoint {
 
 /// One iroh endpoint: transports and time in, peer connectivity out.
 ///
-/// The crypto imports (`polymorph:webcrypto`) are consumed by the
-/// implementation directly and do not appear here. The UDP direct
-/// path uses `wasi:sockets/types@0.3.0`, whose `udp-socket` resource
-/// carries the socket operations in the 0.3 draft.
+/// The crypto imports (`polymorph:webcrypto`) are mostly consumed by the
+/// implementation directly and do not appear here; the `signature`
+/// interface does appear, because `endpoint-options.identity` carries
+/// its key handles. The UDP direct path uses `wasi:sockets/types@0.3.0`,
+/// whose `udp-socket` resource carries the socket operations in the 0.3
+/// draft.
 world iroh-endpoint {
+    import polymorph:webcrypto/signature@0.1.0;
     import polymorph:webrtc-datachannels/connections@0.1.0;
     import polymorph:websocket/connections@0.1.0;
     import wasi:clocks/monotonic-clock@0.3.0;

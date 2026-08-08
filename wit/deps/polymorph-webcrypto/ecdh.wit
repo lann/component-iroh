@@ -1,0 +1,123 @@
+package polymorph:webcrypto@0.1.0;
+
+/// ECDH key agreement over the NIST prime-order curves (SP 800-56A), as
+/// the Web Cryptography API serves it.
+///
+/// Keys returned here drive `key-agreement.secret-key.agree`, exactly as
+/// X25519's do: the `derive-input` it returns feeds `derive-bits`, the
+/// key-minting interfaces' `derive-key`, and the per-hash KDF prepare
+/// interfaces. The shared secret is the x-coordinate of the agreed point
+/// (SP 800-56A's `Z`), so the natural output length is the curve's field
+/// size: 32 bytes for P-256, 48 bytes for P-384. Keys report
+/// `algorithm-name` `"ECDH"` regardless of curve, and `agree` fails
+/// `error.invalid-key` on a curve-mismatched peer — the same derive-time
+/// check the `key-agreement` kind documents for algorithm-mismatched
+/// peers.
+///
+/// Formats follow the format-admission rule (see `README.md`, "Design
+/// notes"): every format is one a platform-backed host passes to the
+/// platform verbatim. The public key travels as an uncompressed SEC1
+/// point (WebCrypto's public-only `raw` format for EC keys); the secret
+/// key travels as PKCS#8 or an EC private JWK. Bare secret scalars have
+/// no platform door and are not a format here.
+///
+/// Security:
+/// - Public imports are strict, unlike X25519's deliberately permissive
+///   raw import: a point not on the declared variant's curve fails
+///   `error.invalid-key` at import, as it does on the platform. A valid
+///   point multiplied by a valid scalar on these prime-order curves
+///   cannot produce the point at infinity, so a degenerate peer is
+///   rejected where it enters rather than surfacing at `agree` (the
+///   kind's contributory check stays satisfied by construction).
+interface ecdh {
+    use types.{error};
+    use key-agreement.{public-key, secret-key, agreement-key-options};
+    use wrapping.{unwrap-input};
+
+    /// The served curves. (Each algorithm interface names its closed set
+    /// of parameterizations `<algorithm>-variant`; ECDH's parameter is
+    /// the curve alone.)
+    enum ecdh-variant {
+        /// NIST P-256 (secp256r1).
+        p256,
+        /// NIST P-384 (secp384r1).
+        p384,
+        /// NIST P-521 (secp521r1). Declared because the WebCrypto
+        /// registry serves it and enum growth is breaking; no current
+        /// implementation of this package serves it — expect
+        /// `error.unsupported` unless composed with a provider that
+        /// specifically offers it.
+        p521,
+    }
+
+    /// Import a public key as an uncompressed SEC1 point (`04 ‖ x ‖ y`;
+    /// 65 bytes for P-256, 97 bytes for P-384 — WebCrypto's `raw`
+    /// format). Anything else — including compressed points and points
+    /// not on the declared variant's curve — fails with
+    /// `error.invalid-key`. `public-key.export-key-raw` returns this
+    /// same form.
+    import-public-key-raw: async func(%variant: ecdh-variant, raw: list<u8>) -> result<public-key, error>;
+
+    /// Import a public key as an X.509 SubjectPublicKeyInfo (DER). The
+    /// curve must be named by OID and must match the declared variant's,
+    /// or the import fails with `error.invalid-key`: an encoding that
+    /// carries explicit ECParameters instead of the named-curve OID is
+    /// rejected even when the parameters describe the variant's curve. A
+    /// point not on the curve is always rejected. An uncompressed point
+    /// is always accepted; whether a *compressed* encoding is accepted is
+    /// implementation-defined, as it is across WebCrypto engines — do not
+    /// rely on either behavior.
+    import-public-key-spki: async func(%variant: ecdh-variant, spki: list<u8>) -> result<public-key, error>;
+
+    /// Import a public key as an EC public JWK (`kty: "EC"`, with `crv`,
+    /// `x`, and `y`). `jwk` is the JWK as JSON text; see
+    /// `mac-key.export-key-jwk` for the package-wide JWK contract
+    /// (`alg` is ignored entirely, WebCrypto's rule for the ECDH
+    /// family). The JWK's `crv` must match the declared variant's curve
+    /// (`error.invalid-key` otherwise), and the encoded point is
+    /// admitted exactly as `import-public-key-raw` admits it.
+    import-public-key-jwk: async func(%variant: ecdh-variant, jwk: string) -> result<public-key, error>;
+
+    /// Import a static secret key as an EC private JWK (`kty: "EC"`,
+    /// with `crv`, `d`, and the public coordinates `x`/`y`, which RFC
+    /// 7518 makes mandatory — this is inherently the public+private
+    /// form). `jwk` is the JWK as JSON text; see `mac-key.export-key-jwk`
+    /// for the package-wide JWK contract, including `ext` validation
+    /// against the options' extractability. `d` is the curve's scalar
+    /// and must lie in `[1, n-1]` (`error.invalid-key` otherwise).
+    ///
+    /// Security:
+    /// - Implementations MAY reject a JWK whose `x`/`y` is not the
+    ///   public point of `d` with `error.invalid-key`, and MUST NOT
+    ///   trust `x`/`y` for any operation: the imported key's identity is
+    ///   `d`'s. (The W3C Web Cryptography API's import steps do not
+    ///   mandate the consistency check, and engines differ, so a
+    ///   platform-backed host cannot promise it.)
+    import-secret-key-jwk: async func(%variant: ecdh-variant, jwk: string, options: agreement-key-options) -> result<secret-key, error>;
+
+    /// Import a static secret key as a PKCS#8 PrivateKeyInfo (DER, the
+    /// RFC 5915 ECPrivateKey body). The encoded curve must match the
+    /// declared variant's (`error.invalid-key`), and the scalar must lie
+    /// in `[1, n-1]`; an embedded public key, when present, is validated
+    /// against the scalar and never trusted on its own.
+    import-secret-key-pkcs8: async func(%variant: ecdh-variant, pkcs8: list<u8>, options: agreement-key-options) -> result<secret-key, error>;
+
+    /// Generate a fresh key pair on the declared variant's curve.
+    generate-key: async func(%variant: ecdh-variant, options: agreement-key-options) -> result<tuple<secret-key, public-key>, error>;
+
+    /// Mint a static secret key from unwrapped key material (see the
+    /// `wrapping` interface): `input`'s bytes are read as an EC private
+    /// JWK, subject to `import-secret-key-jwk`'s contract plus the
+    /// unwrap-path `use`/`key_ops` checks (see `README.md`, "JWK
+    /// contract"). `input` is consumed.
+    ///
+    /// The minted key's grants and extractability come from `options`
+    /// alone (the W3C Web Cryptography API's `unwrapKey` model).
+    unwrap-secret-key-jwk: async func(%variant: ecdh-variant, input: unwrap-input, options: agreement-key-options) -> result<secret-key, error>;
+
+    /// Mint a static secret key from unwrapped key material read as a
+    /// PKCS#8 PrivateKeyInfo, subject to `import-secret-key-pkcs8`'s
+    /// contract. `input` is consumed; see `unwrap-secret-key-jwk` for
+    /// the options model.
+    unwrap-secret-key-pkcs8: async func(%variant: ecdh-variant, input: unwrap-input, options: agreement-key-options) -> result<secret-key, error>;
+}

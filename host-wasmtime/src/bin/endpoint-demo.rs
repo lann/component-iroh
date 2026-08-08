@@ -90,6 +90,7 @@ struct Cli {
     webrtc: bool,
     peer_relay: Option<String>,
     payload_bytes: Option<u64>,
+    inject_identity: bool,
     message: String,
 }
 
@@ -98,7 +99,8 @@ fn usage() -> wasmtime::Error {
         "usage: endpoint-demo <composed.wasm> --role <client|server> \
          --relay <relay-url> [--peer <endpoint-id-hex>] [--alpn A] \
          [--udp-bind <ip:port>] [--direct <ip:port>] [--webrtc] \
-         [--peer-relay <relay-url>] [--payload-bytes N] [--message M]",
+         [--peer-relay <relay-url>] [--payload-bytes N] \
+         [--inject-identity] [--message M]",
     )
 }
 
@@ -114,6 +116,7 @@ fn parse_args() -> Result<Cli> {
     let mut webrtc = false;
     let mut peer_relay = None;
     let mut payload_bytes = None;
+    let mut inject_identity = false;
     let mut message = "hello through the endpoint surface".to_string();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(usage);
@@ -135,6 +138,7 @@ fn parse_args() -> Result<Cli> {
             "--payload-bytes" => {
                 payload_bytes = Some(value()?.parse::<u64>().map_err(|_| usage())?)
             }
+            "--inject-identity" => inject_identity = true,
             "--message" => message = value()?,
             _ => return Err(usage()),
         }
@@ -150,6 +154,7 @@ fn parse_args() -> Result<Cli> {
         webrtc,
         peer_relay,
         payload_bytes,
+        inject_identity,
         message,
     })
 }
@@ -198,6 +203,7 @@ async fn main() -> Result<()> {
         webrtc: cli.webrtc,
         peer_relay: cli.peer_relay,
         payload_bytes: cli.payload_bytes,
+        inject_identity: cli.inject_identity,
         message: cli.message,
     };
     let report = store

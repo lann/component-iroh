@@ -1,0 +1,131 @@
+package polymorph:webcrypto@0.1.0;
+
+/// HMAC key minting (RFC 2104) over the SHA-2 hash family (FIPS 180-4).
+///
+/// Keys minted here drive `mac.mac-key.sign` and `verify`. Adding an
+/// algorithm touches only an interface like this one: the generic `mac`
+/// surface is closed.
+interface hmac-sha2 {
+    use types.{error};
+    use mac.{mac-key, mac-key-options};
+    use sha2.{sha2-variant};
+    use derivation.{derive-input};
+    use wrapping.{unwrap-input};
+
+    /// Import raw key material as an HMAC key over the declared SHA-2
+    /// variant.
+    ///
+    /// Empty keys fail `error.invalid-key`. Implementations generally
+    /// accept any non-empty length (per RFC 2104; keys longer than the
+    /// block size are hashed first), but an implementation enforcing a
+    /// security policy (for example FIPS 140-3 approved mode, which
+    /// requires keys of at least 112 bits) MAY reject shorter keys with
+    /// `error.invalid-key`. An implementation not serving the variant
+    /// fails with `error.unsupported`.
+    import-key-raw: async func(%variant: sha2-variant, raw: list<u8>, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Import an RFC 7517 JSON Web Key as an HMAC key over the declared
+    /// SHA-2 variant.
+    ///
+    /// `jwk` is the JWK as JSON text; the implementation owns the parse
+    /// (see `README.md`, "JWK contract"). The key must be an `oct` key
+    /// whose `alg`, if present, names the declared variant
+    /// (`"HS256"`/`"HS384"`/`"HS512"`), with `ext` validated against the
+    /// options' extractability; the decoded material is then subject to
+    /// `import-key-raw`'s contract.
+    import-key-jwk: async func(%variant: sha2-variant, jwk: string, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Generate a fresh random HMAC key over the declared SHA-2 variant.
+    ///
+    /// `length` is the key length in bits (WebCrypto's
+    /// `HmacKeyGenParams.length`, reported back by
+    /// `mac-key.algorithm-length`). `none` means the underlying hash's
+    /// block size (WebCrypto's `generateKey` default: 512 bits for
+    /// SHA-256, 1024 for SHA-384/512).
+    ///
+    /// Failure cases:
+    /// - a zero `length` fails `error.invalid-key`;
+    /// - implementations MAY decline lengths that are not a multiple of 8
+    ///   with `error.unsupported` (none of this package's implementations
+    ///   serve sub-byte lengths);
+    /// - implementations MAY apply the same policy bounds as `import-key-raw`;
+    /// - an unserved variant fails `error.unsupported`.
+    generate-key: async func(%variant: sha2-variant, length: option<u32>, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Mint a key from a parameterized derivation: the derivation runs
+    /// at `length` bits and the result is subject to `import-key-raw`'s
+    /// contract.
+    ///
+    /// `length` follows `generate-key`'s contract exactly (WebCrypto's
+    /// `deriveKey` computes the derived length by the same `get key
+    /// length` step `generateKey` uses).
+    ///
+    /// Requires `can-derive-key` on the input, else `error.not-permitted`;
+    /// requesting an extractable key additionally requires
+    /// `can-derive-bits` (see `aes-gcm.derive-key`).
+    derive-key: async func(%variant: sha2-variant, input: borrow<derive-input>, length: option<u32>, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Mint a key from unwrapped key material (see the `wrapping`
+    /// interface): `input`'s bytes are read as raw key material, subject
+    /// to `import-key-raw`'s contract. `input` is consumed.
+    ///
+    /// The minted key's usages and extractability come from `options`
+    /// alone (the W3C Web Cryptography API's `unwrapKey` model).
+    unwrap-key-raw: async func(%variant: sha2-variant, input: unwrap-input, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Mint a key from unwrapped key material read as an RFC 7517 JSON
+    /// Web Key, subject to `import-key-jwk`'s contract plus the
+    /// unwrap-path `use`/`key_ops` checks (see `README.md`, "JWK
+    /// contract"). `input` is consumed; see `unwrap-key-raw` for the
+    /// options model.
+    unwrap-key-jwk: async func(%variant: sha2-variant, input: unwrap-input, options: mac-key-options) -> result<mac-key, error>;
+}
+
+/// HMAC key minting (RFC 2104) over SHA-1 (FIPS 180-4), for
+/// interoperability with SHA-1-committed constructions — RFC 6238 TOTP,
+/// WPA2's handshake PRF, and their contemporaries.
+///
+/// Security:
+/// - HMAC-SHA-1 is *not* affected by SHA-1's collision breaks: HMAC's
+///   security rests on the compression function's PRF property, which
+///   stands. The construction is sound; only its hash is
+///   hygiene-stale. Prefer `hmac-sha2` in new designs.
+/// - No SHA-1 digest is ever exposed here (the hash runs inside the
+///   construction); bare SHA-1 digests exist in this package only through
+///   `sha1-checked`.
+///
+/// Keys report `algorithm-hash` `"SHA-1"`; every other contract —
+/// key-length policy, `length` semantics (the block size, 512 bits, when
+/// `none`), JWK handling (`alg` `"HS1"`) — is `hmac-sha2`'s, minus the
+/// variant parameter.
+interface hmac-sha1 {
+    use types.{error};
+    use mac.{mac-key, mac-key-options};
+    use derivation.{derive-input};
+    use wrapping.{unwrap-input};
+
+    /// Import raw key material as an HMAC-SHA-1 key. See
+    /// `hmac-sha2.import-key-raw` for the key-length contract.
+    import-key-raw: async func(raw: list<u8>, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Import an RFC 7517 JSON Web Key as an HMAC-SHA-1 key (`alg`, when
+    /// present, must be `"HS1"`). See `hmac-sha2.import-key-jwk`.
+    import-key-jwk: async func(jwk: string, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Generate a fresh random HMAC-SHA-1 key. See
+    /// `hmac-sha2.generate-key` for the `length` contract; `none` means
+    /// SHA-1's block size, 512 bits.
+    generate-key: async func(length: option<u32>, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Mint a key from a parameterized derivation. See
+    /// `hmac-sha2.derive-key`.
+    derive-key: async func(input: borrow<derive-input>, length: option<u32>, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Mint a key from unwrapped key material read as raw bytes. See
+    /// `hmac-sha2.unwrap-key-raw`.
+    unwrap-key-raw: async func(input: unwrap-input, options: mac-key-options) -> result<mac-key, error>;
+
+    /// Mint a key from unwrapped key material read as an RFC 7517 JSON
+    /// Web Key. See `hmac-sha2.unwrap-key-jwk`.
+    unwrap-key-jwk: async func(input: unwrap-input, options: mac-key-options) -> result<mac-key, error>;
+}

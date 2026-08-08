@@ -11,13 +11,23 @@ mod bindings {
         path: "wit",
         world: "iroh-demo",
         generate_all,
+        // The webcrypto interfaces are bound once in polymorph-webcrypto-guest
+        // (this crate mints the injected identity through it); the
+        // `signature` handles it wraps must be the same resource types
+        // the endpoint import names.
+        with: {
+            "polymorph:webcrypto/types@0.1.0": polymorph_webcrypto_guest::bindings::types,
+            "polymorph:webcrypto/wrapping@0.1.0": polymorph_webcrypto_guest::bindings::wrapping,
+            "polymorph:webcrypto/signature@0.1.0": polymorph_webcrypto_guest::bindings::signature,
+        },
     });
 }
 
 use bindings::exports::polymorph::iroh_demo::demo::{Guest, Role, RunConfig, RunReport};
-use bindings::polymorph::iroh::endpoint::{Connection, Endpoint, EndpointOptions};
+use bindings::polymorph::iroh::endpoint::{Connection, Endpoint, EndpointOptions, Identity};
 use bindings::polymorph::iroh::types::{EndpointAddr, Error, PathKind, TransportAddr};
 use bindings::wasi::clocks::monotonic_clock;
+use polymorph_webcrypto_guest::{ed25519, SigningKeyOptions};
 
 /// The demo's ALPN protocol.
 const ALPN: &[u8] = b"iroh-demo/0";
@@ -33,14 +43,43 @@ struct Component;
 
 impl Guest for Component {
     async fn run(config: RunConfig) -> Result<RunReport, String> {
+        // The injected-identity path: mint the pair here, hand it to
+        // bind, and require the endpoint to adopt it.
+        let (identity, expected_id) = if config.inject_identity {
+            let (signing, verifying) = ed25519::generate_key(SigningKeyOptions {
+                sign: true,
+                extractable: false,
+            })
+            .await
+            .map_err(|e| format!("mint identity: {e}"))?;
+            let expected = verifying
+                .export_key_raw()
+                .await
+                .map_err(|e| format!("export minted public key: {e}"))?;
+            let identity = Identity {
+                signing_key: signing.into_raw(),
+                verifying_key: verifying.into_raw(),
+            };
+            (Some(identity), Some(expected))
+        } else {
+            (None, None)
+        };
+
         let endpoint = Endpoint::bind(EndpointOptions {
             alpns: vec![ALPN.to_vec()],
             relay_url: Some(config.relay_url.clone()),
             udp_bind_addr: config.udp_bind.clone(),
             webrtc: config.webrtc,
+            identity,
         })
         .await
         .map_err(fail("bind"))?;
+
+        if let Some(expected) = expected_id {
+            if endpoint.id() != expected {
+                return Err("bind did not adopt the injected identity".into());
+            }
+        }
 
         // The driver hands this ID to the peer process.
         println!("endpoint-id {}", hex::encode(endpoint.id()));

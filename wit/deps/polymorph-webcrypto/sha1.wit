@@ -1,0 +1,66 @@
+package polymorph:webcrypto@0.1.0;
+
+/// SHA-1 digests with collision-attack detection (`sha1-checked`, after
+/// the RustCrypto packaging of the Stevens–Karpman counter-cryptanalysis
+/// that Git ships as sha1dc).
+///
+/// This package never serves a *plain* SHA-1 digest (the HMAC-SHA-1
+/// family runs the hash inside its construction, where collision
+/// resistance is not load-bearing and no digest is exposed). Both
+/// constructors mint a
+/// `digest` whose `compute` runs standard SHA-1 *plus* detection of the
+/// disturbance-vector patterns every known collision attack requires, and
+/// each constructor fixes what happens when detection fires. On honest
+/// input — input carrying no attack pattern — both postures return the
+/// standard SHA-1 digest, byte-identical to any other SHA-1
+/// implementation.
+///
+/// Both postures are deterministic: two parties hashing the same input
+/// always agree on the outcome. Keys minted here report `algorithm-name`
+/// `"SHA-1"`.
+///
+/// Security:
+/// - SHA-1 is broken for collision resistance. Use this interface for
+///   interoperability with SHA-1-committed formats (Git-family content
+///   addressing, legacy protocols), never in new designs — `sha2` is the
+///   default.
+/// - Detection is one-sided: it recognizes the known attack families'
+///   patterns. An honest-input digest is exactly SHA-1, with SHA-1's
+///   (broken) guarantees.
+/// - Detection branches only on the input, which this interface treats as
+///   public (the digest kind is unkeyed), so providers in shared timing
+///   domains can serve it (see `README.md`, "Timing-channel policy").
+///
+/// Gated `@unstable`: platform WebCrypto carries no sha1dc, so
+/// platform-backed providers cannot serve this interface (see
+/// `README.md`, "Stability gates"). Consumers opt in by enabling the
+/// feature in their tooling.
+@unstable(feature = sha1-checked)
+interface sha1-checked {
+    @unstable(feature = sha1-checked)
+    use types.{error};
+    @unstable(feature = sha1-checked)
+    use digest.{digest};
+
+    /// Mint a SHA-1 digest that *rejects* on a detected collision attack:
+    /// `compute` fails with `error.extension` — origin `"polymorph:webcrypto"`,
+    /// name `"collision-detected"` — for input carrying an attack
+    /// pattern, and returns the standard SHA-1 digest for everything
+    /// else. Choose this posture to surface an attack as a diagnosable
+    /// error.
+    @unstable(feature = sha1-checked)
+    make-rejecting-digest: func() -> result<digest, error>;
+
+    /// Mint a SHA-1 digest that *mitigates* a detected collision attack:
+    /// for input carrying an attack pattern, `compute` returns the
+    /// sha1dc safe hash — a deterministic hardened variant the attack was
+    /// not engineered against — and the standard SHA-1 digest for
+    /// everything else. Two parties hashing the same attacked input agree
+    /// on its safe hash, so pipelines keep flowing while the colliding
+    /// pair no longer collides. Choose this posture for content
+    /// addressing, where an error would wedge the pipeline; the cost is
+    /// that an attack surfaces as an external hash mismatch rather than a
+    /// named error.
+    @unstable(feature = sha1-checked)
+    make-mitigating-digest: func() -> result<digest, error>;
+}

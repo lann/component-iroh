@@ -41,6 +41,12 @@ interface demo {
         /// round-trips the full payload; `roundtrip-ms` then measures
         /// bulk transfer, not latency.
         payload-bytes: option<u64>,
+        /// Mint an Ed25519 pair through `polymorph:webcrypto` in this
+        /// component and hand it to `bind` as the endpoint's identity,
+        /// instead of letting the endpoint mint its own. The run fails
+        /// unless the endpoint reports the injected public key as its
+        /// `endpoint-id`.
+        inject-identity: bool,
         /// The application message the client sends (the server echoes it).
         message: string,
     }
